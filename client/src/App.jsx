@@ -3,7 +3,10 @@ import { AuthProvider, useAuth } from './auth';
 import Layout from './components/Layout';
 import { Spinner } from './components/Glass';
 import Login from './pages/Login';
+import OBLogin from './pages/OBLogin';
 import Signup from './pages/Signup';
+import ForgotPassword from './pages/ForgotPassword';
+import ResetPassword from './pages/ResetPassword';
 import Home from './pages/Home';
 import Complaints from './pages/Complaints';
 import Dues from './pages/Dues';
@@ -35,7 +38,10 @@ export default function App() {
       <BrowserRouter>
         <Routes>
           <Route path="/login" element={<Login />} />
+          <Route path="/ob/login" element={<OBLogin />} />
           <Route path="/signup" element={<Signup />} />
+          <Route path="/forgot-password" element={<ForgotPassword />} />
+          <Route path="/reset-password" element={<ResetPassword />} />
           <Route
             element={
               <Protected>

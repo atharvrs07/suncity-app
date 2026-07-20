@@ -11,7 +11,9 @@ db.exec(`
 CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
-  phone TEXT NOT NULL UNIQUE,
+  phone TEXT UNIQUE,
+  username TEXT UNIQUE,
+  email TEXT UNIQUE,
   password_hash TEXT NOT NULL,
   flat_no TEXT,
   role TEXT NOT NULL CHECK (role IN ('admin','office_bearer','supervisor','resident')),
@@ -133,7 +135,87 @@ CREATE TABLE IF NOT EXISTS gallery_photos (
   uploaded_by INTEGER NOT NULL REFERENCES users(id),
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  token_hash TEXT NOT NULL UNIQUE,
+  expires_at TEXT NOT NULL,
+  used_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Pending resident signups awaiting email OTP verification. The user row is
+-- only created once the OTP is confirmed, so this table holds the entered
+-- details (password already bcrypt-hashed) plus the SHA-256-hashed code,
+-- expiry, and abuse counters. One in-flight signup per email (UNIQUE); a
+-- re-signup replaces the previous pending record.
+CREATE TABLE IF NOT EXISTS signup_otps (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  email TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  phone TEXT NOT NULL,
+  flat_no TEXT,
+  password_hash TEXT NOT NULL,
+  code_hash TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  resends INTEGER NOT NULL DEFAULT 0,
+  last_sent_at TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 `);
+
+// Migration for DBs created before office-bearer username login existed:
+// phone must become nullable and username added, which SQLite only allows
+// via a table rebuild (new table, copy, drop, rename — per SQLite docs).
+function migrateUsersUsername() {
+  const cols = db.prepare('PRAGMA table_info(users)').all();
+  if (cols.some((c) => c.name === 'username')) return;
+  console.log('[migrate] Rebuilding users table to add username login support…');
+  db.pragma('foreign_keys = OFF');
+  db.transaction(() => {
+    db.exec(`
+      CREATE TABLE users_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        phone TEXT UNIQUE,
+        username TEXT UNIQUE,
+        password_hash TEXT NOT NULL,
+        flat_no TEXT,
+        role TEXT NOT NULL CHECK (role IN ('admin','office_bearer','supervisor','resident')),
+        role_detail TEXT,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected')),
+        approved_by INTEGER,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      INSERT INTO users_new (id, name, phone, password_hash, flat_no, role, role_detail, status, approved_by, created_at)
+        SELECT id, name, phone, password_hash, flat_no, role, role_detail, status, approved_by, created_at FROM users;
+      DROP TABLE users;
+      ALTER TABLE users_new RENAME TO users;
+    `);
+  })();
+  db.pragma('foreign_keys = ON');
+  const violations = db.prepare('PRAGMA foreign_key_check').all();
+  if (violations.length > 0) {
+    throw new Error(`users migration left ${violations.length} foreign key violation(s)`);
+  }
+  console.log('[migrate] users table rebuilt.');
+}
+migrateUsersUsername();
+
+// Migration for DBs created before the forgot-password flow existed: email is
+// a plain nullable column, so a simple ADD COLUMN + unique index suffices
+// (SQLite disallows UNIQUE in ADD COLUMN; fresh DBs get it from CREATE TABLE).
+function migrateUsersEmail() {
+  const cols = db.prepare('PRAGMA table_info(users)').all();
+  if (!cols.some((c) => c.name === 'email')) {
+    console.log('[migrate] Adding users.email column…');
+    db.exec('ALTER TABLE users ADD COLUMN email TEXT');
+  }
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users (email) WHERE email IS NOT NULL');
+}
+migrateUsersEmail();
 
 // The approval chain must never get stuck with zero admins: whenever no
 // approved admin exists, create (or promote) the fallback admin from env.

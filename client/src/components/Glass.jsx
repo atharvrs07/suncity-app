@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 
 export function GlassCard({ children, className = '', onClick, ...rest }) {
@@ -28,6 +29,34 @@ export function Field({ label, children }) {
     <div className="field">
       {label && <label>{label}</label>}
       {children}
+    </div>
+  );
+}
+
+const EyeIcon = ({ off }) => (
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M2 12s3.5-6.5 10-6.5S22 12 22 12s-3.5 6.5-10 6.5S2 12 2 12Z" />
+    <circle cx="12" cy="12" r="2.8" />
+    {off && <line x1="4" y1="20" x2="20" y2="4" />}
+  </svg>
+);
+
+// Password input with a show/hide (eye) toggle. Drop-in replacement for
+// <input className="input" type="password" /> inside a <Field>.
+export function PasswordInput({ className = '', ...rest }) {
+  const [show, setShow] = useState(false);
+  return (
+    <div className="pwd-wrap">
+      <input className={`input ${className}`} type={show ? 'text' : 'password'} {...rest} />
+      <button
+        type="button"
+        className="pwd-eye"
+        aria-label={show ? 'Hide password' : 'Show password'}
+        title={show ? 'Hide password' : 'Show password'}
+        onClick={() => setShow((s) => !s)}
+      >
+        <EyeIcon off={show} />
+      </button>
     </div>
   );
 }

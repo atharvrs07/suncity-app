@@ -1,39 +1,43 @@
-import { useState } from 'react';
-import { Link } from 'react-router-dom';
+import { useEffect, useState } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { api } from '../api';
-import { Btn, Field } from '../components/Glass';
-import { OFFICE_BEARER_ROLES, SUPERVISOR_ROLES } from '../constants';
+import { useAuth } from '../auth';
+import { Btn, Field, PasswordInput } from '../components/Glass';
 
-const ROLE_OPTIONS = [
-  { value: 'resident', label: 'Resident' },
-  { value: 'office_bearer', label: 'Office Bearer' },
-  { value: 'supervisor', label: 'Supervisor' },
-  { value: 'admin', label: 'Admin' },
-];
+const RESEND_COOLDOWN = 60; // seconds — mirrors the server-side resend gate
 
 export default function Signup() {
-  const [form, setForm] = useState({
-    name: '',
-    phone: '',
-    flat_no: '',
-    password: '',
-    role: 'resident',
-    role_detail: '',
-  });
+  const { completeSignup } = useAuth();
+  const navigate = useNavigate();
+
+  const [step, setStep] = useState('form'); // 'form' → 'otp'
+  const [form, setForm] = useState({ name: '', phone: '', email: '', flat_no: '', password: '' });
+  const [otp, setOtp] = useState('');
   const [error, setError] = useState('');
-  const [done, setDone] = useState(false);
+  const [info, setInfo] = useState('');
   const [busy, setBusy] = useState(false);
+  const [cooldown, setCooldown] = useState(0);
 
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
 
-  async function submit(e) {
+  // Tick down the resend cooldown once per second.
+  useEffect(() => {
+    if (cooldown <= 0) return undefined;
+    const t = setInterval(() => setCooldown((c) => (c > 0 ? c - 1 : 0)), 1000);
+    return () => clearInterval(t);
+  }, [cooldown]);
+
+  async function submitForm(e) {
     e.preventDefault();
     setBusy(true);
     setError('');
+    setInfo('');
     try {
-      await api('/api/auth/signup', { method: 'POST', body: form });
-      setDone(true);
+      const d = await api('/api/auth/signup', { method: 'POST', body: form });
+      setStep('otp');
+      setInfo(d.message || `We've emailed a 6-digit code to ${form.email}.`);
+      setCooldown(RESEND_COOLDOWN);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -41,21 +45,112 @@ export default function Signup() {
     }
   }
 
-  if (done) {
+  async function verifyOtp(e) {
+    e.preventDefault();
+    setBusy(true);
+    setError('');
+    try {
+      const d = await api('/api/auth/verify-signup', {
+        method: 'POST',
+        body: { email: form.email, otp },
+      });
+      completeSignup(d.token, d.user);
+      navigate('/', { replace: true });
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function resend() {
+    if (cooldown > 0 || busy) return;
+    setBusy(true);
+    setError('');
+    setInfo('');
+    try {
+      const d = await api('/api/auth/resend-otp', { method: 'POST', body: { email: form.email } });
+      setInfo(d.message || 'A new code has been sent.');
+      setCooldown(RESEND_COOLDOWN);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function editEmail() {
+    setStep('form');
+    setOtp('');
+    setError('');
+    setInfo('');
+  }
+
+  if (step === 'otp') {
     return (
       <div className="auth-wrap">
-        <motion.div className="glass auth-card" initial={{ opacity: 0, scale: 0.94 }} animate={{ opacity: 1, scale: 1 }}>
+        <motion.div
+          className="glass auth-card"
+          initial={{ opacity: 0, y: 24 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ type: 'spring', damping: 24, stiffness: 260 }}
+        >
           <div className="auth-logo">
-            <div className="e">⏳</div>
-            <h1>Almost there!</h1>
+            <div className="e">📧</div>
+            <h1>Verify your email</h1>
             <p>
-              Your signup was received. An admin will review and approve your account — you can log in once
-              that happens.
+              Enter the 6-digit code we sent to <strong>{form.email}</strong>
             </p>
           </div>
-          <Link to="/login">
-            <Btn block>Back to Sign In</Btn>
-          </Link>
+          {error && <div className="err-banner">{error}</div>}
+          {info && !error && <div className="ok-banner">{info}</div>}
+          <form onSubmit={verifyOtp}>
+            <Field label="VERIFICATION CODE">
+              <input
+                className="input otp-input"
+                type="text"
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                maxLength={6}
+                placeholder="••••••"
+                value={otp}
+                onChange={(e) => setOtp(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                autoFocus
+                required
+              />
+            </Field>
+            <Btn block disabled={busy || otp.length !== 6} type="submit">
+              {busy ? 'Verifying…' : 'Verify & Create Account'}
+            </Btn>
+          </form>
+          <p className="muted" style={{ textAlign: 'center', marginTop: 16 }}>
+            Didn't get it?{' '}
+            {cooldown > 0 ? (
+              <span>Resend in {cooldown}s</span>
+            ) : (
+              <a
+                href="#resend"
+                onClick={(e) => {
+                  e.preventDefault();
+                  resend();
+                }}
+              >
+                Resend code
+              </a>
+            )}
+          </p>
+          <p className="muted" style={{ textAlign: 'center', marginTop: 6 }}>
+            Wrong email?{' '}
+            <a
+              href="#edit"
+              onClick={(e) => {
+                e.preventDefault();
+                editEmail();
+              }}
+            >
+              Go back
+            </a>
+          </p>
         </motion.div>
       </div>
     );
@@ -75,7 +170,7 @@ export default function Signup() {
           <p>Join My Suncity Vistaar</p>
         </div>
         {error && <div className="err-banner">{error}</div>}
-        <form onSubmit={submit}>
+        <form onSubmit={submitForm}>
           <Field label="FULL NAME">
             <input className="input" value={form.name} onChange={set('name')} placeholder="Your name" required />
           </Field>
@@ -90,63 +185,29 @@ export default function Signup() {
               required
             />
           </Field>
+          <Field label="EMAIL">
+            <input
+              className="input"
+              type="email"
+              value={form.email}
+              onChange={set('email')}
+              placeholder="you@example.com"
+              required
+            />
+          </Field>
           <Field label="FLAT / HOUSE NO. (OPTIONAL)">
             <input className="input" value={form.flat_no} onChange={set('flat_no')} placeholder="e.g. A-101" />
           </Field>
           <Field label="PASSWORD">
-            <input
-              className="input"
-              type="password"
+            <PasswordInput
               value={form.password}
               onChange={set('password')}
               placeholder="At least 6 characters"
               required
             />
           </Field>
-          <Field label="I AM SIGNING UP AS">
-            <select
-              className="input"
-              value={form.role}
-              onChange={(e) => setForm((f) => ({ ...f, role: e.target.value, role_detail: '' }))}
-            >
-              {ROLE_OPTIONS.map((r) => (
-                <option key={r.value} value={r.value}>
-                  {r.label}
-                </option>
-              ))}
-            </select>
-          </Field>
-          {form.role === 'office_bearer' && (
-            <Field label="OFFICE BEARER ROLE">
-              <select className="input" value={form.role_detail} onChange={set('role_detail')} required>
-                <option value="">Select role…</option>
-                {OFFICE_BEARER_ROLES.map((r) => (
-                  <option key={r} value={r}>
-                    {r}
-                  </option>
-                ))}
-              </select>
-            </Field>
-          )}
-          {form.role === 'supervisor' && (
-            <Field label="SUPERVISOR TYPE">
-              <select className="input" value={form.role_detail} onChange={set('role_detail')} required>
-                <option value="">Select type…</option>
-                {SUPERVISOR_ROLES.map((r) => (
-                  <option key={r.value} value={r.value}>
-                    {r.label}
-                  </option>
-                ))}
-              </select>
-            </Field>
-          )}
-          {form.role === 'admin' && (
-            <p className="muted" style={{ marginBottom: 13 }}>
-              Admin signups need approval from an existing admin.
-            </p>
-          )}
           <Btn block disabled={busy} type="submit">
-            {busy ? 'Submitting…' : 'Sign Up'}
+            {busy ? 'Sending code…' : 'Sign Up'}
           </Btn>
         </form>
         <p className="muted" style={{ textAlign: 'center', marginTop: 16 }}>

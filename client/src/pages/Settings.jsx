@@ -1,12 +1,12 @@
 import { useState } from 'react';
 import { api } from '../api';
 import { useAuth } from '../auth';
-import { GlassCard, Btn, Chip, Field } from '../components/Glass';
+import { GlassCard, Btn, Chip, Field, PasswordInput } from '../components/Glass';
 import { roleLabel } from '../constants';
 
 export default function Settings() {
   const { user, setUser, logout } = useAuth();
-  const [profile, setProfile] = useState({ name: user.name, flat_no: user.flat_no || '' });
+  const [profile, setProfile] = useState({ name: user.name, flat_no: user.flat_no || '', email: user.email || '' });
   const [pwd, setPwd] = useState({ current_password: '', new_password: '' });
   const [msg, setMsg] = useState(null); // { ok, text }
   const [busyProfile, setBusyProfile] = useState(false);
@@ -61,7 +61,7 @@ export default function Settings() {
             </div>
             <div className="grow">
               <div className="title-sm">{user.name}</div>
-              <div className="muted">📱 {user.phone}</div>
+              <div className="muted">{user.phone ? `📱 ${user.phone}` : `@${user.username || ''}`}</div>
             </div>
             <Chip tone="blue">{roleLabel(user)}</Chip>
           </div>
@@ -82,6 +82,15 @@ export default function Settings() {
                 placeholder="e.g. A-101"
               />
             </Field>
+            <Field label="EMAIL (USED FOR PASSWORD RECOVERY)">
+              <input
+                className="input"
+                type="email"
+                value={profile.email}
+                onChange={(e) => setProfile((f) => ({ ...f, email: e.target.value }))}
+                placeholder="you@example.com"
+              />
+            </Field>
             <Btn disabled={busyProfile} type="submit">
               {busyProfile ? 'Saving…' : 'Save Profile'}
             </Btn>
@@ -94,18 +103,14 @@ export default function Settings() {
           </h2>
           <form onSubmit={changePassword}>
             <Field label="CURRENT PASSWORD">
-              <input
-                className="input"
-                type="password"
+              <PasswordInput
                 value={pwd.current_password}
                 onChange={(e) => setPwd((f) => ({ ...f, current_password: e.target.value }))}
                 required
               />
             </Field>
             <Field label="NEW PASSWORD">
-              <input
-                className="input"
-                type="password"
+              <PasswordInput
                 value={pwd.new_password}
                 onChange={(e) => setPwd((f) => ({ ...f, new_password: e.target.value }))}
                 placeholder="At least 6 characters"

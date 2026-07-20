@@ -212,6 +212,8 @@ function AutomationsTab() {
 function UsersTab() {
   const { user: me } = useAuth();
   const { data, loading, reload } = useFetch('/api/users');
+  const [resetResult, setResetResult] = useState(null); // { user, password }
+  const [copied, setCopied] = useState(false);
 
   async function setStatus(u, status) {
     const verb = status === 'approved' ? 'Enable' : 'Disable';
@@ -224,45 +226,99 @@ function UsersTab() {
     }
   }
 
+  async function resetPassword(u) {
+    const who = u.id === me.id ? 'your own' : `${u.name}'s`;
+    if (!confirm(`Reset ${who} password? A new random password is generated and the old one stops working immediately.`)) return;
+    try {
+      const r = await api(`/api/users/${u.id}/reset-password`, { method: 'POST' });
+      setCopied(false);
+      setResetResult({ user: u, password: r.password });
+    } catch (err) {
+      alert(err.message);
+    }
+  }
+
+  async function copyPassword() {
+    try {
+      await navigator.clipboard.writeText(resetResult.password);
+      setCopied(true);
+    } catch {
+      /* clipboard unavailable (e.g. plain http) — password stays visible to copy manually */
+    }
+  }
+
   if (loading) return <Spinner />;
 
   return (
-    <StaggerList>
-      {data &&
-        data.users.map((u) => (
-          <StaggerItem key={u.id}>
-            <GlassCard>
-              <div className="row-between">
-                <span className="title-sm">
-                  {u.name}
-                  {u.id === me.id ? ' (you)' : ''}
-                </span>
-                <Chip tone={u.status === 'approved' ? 'green' : u.status === 'pending' ? 'orange' : 'red'}>
-                  {u.status}
-                </Chip>
-              </div>
-              <p className="muted" style={{ marginTop: 4 }}>
-                {roleLabel(u)} · 📱 {u.phone}
-                {u.flat_no ? ` · Flat ${u.flat_no}` : ''}
-              </p>
-              {u.id !== me.id && (
+    <>
+      <StaggerList>
+        {data &&
+          data.users.map((u) => (
+            <StaggerItem key={u.id}>
+              <GlassCard>
+                <div className="row-between">
+                  <span className="title-sm">
+                    {u.name}
+                    {u.id === me.id ? ' (you)' : ''}
+                  </span>
+                  <Chip tone={u.status === 'approved' ? 'green' : u.status === 'pending' ? 'orange' : 'red'}>
+                    {u.status}
+                  </Chip>
+                </div>
+                <p className="muted" style={{ marginTop: 4 }}>
+                  {roleLabel(u)} · {u.phone ? `📱 ${u.phone}` : `@${u.username || '—'}`}
+                  {u.email ? ` · ✉️ ${u.email}` : ''}
+                  {u.flat_no ? ` · Flat ${u.flat_no}` : ''}
+                </p>
                 <div className="row" style={{ marginTop: 9 }}>
-                  {u.status !== 'approved' && (
+                  {u.id !== me.id && u.status !== 'approved' && (
                     <Btn variant="success" sm onClick={() => setStatus(u, 'approved')}>
                       Enable
                     </Btn>
                   )}
-                  {u.status === 'approved' && (
+                  {u.id !== me.id && u.status === 'approved' && (
                     <Btn variant="danger" sm onClick={() => setStatus(u, 'rejected')}>
                       Disable
                     </Btn>
                   )}
+                  <Btn variant="ghost" sm onClick={() => resetPassword(u)}>
+                    🔑 Reset Password
+                  </Btn>
                 </div>
-              )}
-            </GlassCard>
-          </StaggerItem>
-        ))}
-    </StaggerList>
+              </GlassCard>
+            </StaggerItem>
+          ))}
+      </StaggerList>
+
+      <Sheet
+        open={!!resetResult}
+        onClose={() => setResetResult(null)}
+        title={resetResult ? `New password for ${resetResult.user.name}` : ''}
+      >
+        {resetResult && (
+          <>
+            <p className="muted" style={{ marginBottom: 12 }}>
+              Share it with them securely — it is shown only this once. They can change it later under
+              Settings.
+            </p>
+            <div
+              className="input"
+              style={{ fontFamily: 'ui-monospace, monospace', fontSize: 18, textAlign: 'center', userSelect: 'all' }}
+            >
+              {resetResult.password}
+            </div>
+            <div className="row" style={{ marginTop: 12 }}>
+              <Btn block onClick={copyPassword}>
+                {copied ? '✓ Copied' : 'Copy Password'}
+              </Btn>
+              <Btn block variant="ghost" onClick={() => setResetResult(null)}>
+                Done
+              </Btn>
+            </div>
+          </>
+        )}
+      </Sheet>
+    </>
   );
 }
 

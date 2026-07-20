@@ -56,6 +56,12 @@ module.exports = {
   UPLOADS_DIR,
   PORT: parseInt(process.env.PORT || '4000', 10),
   JWT_SECRET: process.env.JWT_SECRET || 'dev-secret-change-me',
+  // Base URL used in emailed links (password reset). Defaults to the local server.
+  APP_BASE_URL: process.env.APP_BASE_URL || `http://localhost:${process.env.PORT || 4000}`,
+  MAIL: {
+    user: process.env.GMAIL_USER || 'suncityvistaar2000@gmail.com',
+    appPassword: process.env.GMAIL_APP_PASSWORD || '', // empty → emails are logged to console instead
+  },
   UPI_VPA: process.env.SOCIETY_UPI_VPA || 'society@upi',
   UPI_PAYEE: process.env.SOCIETY_UPI_PAYEE_NAME || 'My Suncity Vistaar',
   ADMIN_SEED: {

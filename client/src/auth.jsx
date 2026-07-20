@@ -22,13 +22,30 @@ export function AuthProvider({ children }) {
     return d.user;
   }, []);
 
+  const obLogin = useCallback(async (username, password) => {
+    const d = await api('/api/auth/ob-login', { method: 'POST', body: { username, password } });
+    setToken(d.token);
+    setUser(d.user);
+    return d.user;
+  }, []);
+
+  // Adopt a session issued outside the login endpoints (e.g. the token the
+  // OTP signup returns once the account is created and verified).
+  const completeSignup = useCallback((token, u) => {
+    setToken(token);
+    setUser(u);
+    return u;
+  }, []);
+
   const logout = useCallback(() => {
     clearToken();
     setUser(null);
   }, []);
 
   return (
-    <AuthContext.Provider value={{ user, setUser, loading, login, logout }}>{children}</AuthContext.Provider>
+    <AuthContext.Provider value={{ user, setUser, loading, login, obLogin, completeSignup, logout }}>
+      {children}
+    </AuthContext.Provider>
   );
 }
 

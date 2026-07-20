@@ -3,4 +3,5 @@ client/node_modules/
 client/dist/
 data/
 .env
+office-bearer-credentials.txt
 *.log

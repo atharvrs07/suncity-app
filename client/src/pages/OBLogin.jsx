@@ -1,13 +1,15 @@
 import { useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { useAuth } from '../auth';
 import { Btn, Field, PasswordInput } from '../components/Glass';
 
-export default function Login() {
-  const { login } = useAuth();
+// Office-bearer login. Intentionally NOT linked from anywhere in the app —
+// reachable only by typing /ob/login directly. Keep it that way.
+export default function OBLogin() {
+  const { obLogin } = useAuth();
   const navigate = useNavigate();
-  const [phone, setPhone] = useState('');
+  const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -17,7 +19,7 @@ export default function Login() {
     setBusy(true);
     setError('');
     try {
-      await login(phone, password);
+      await obLogin(username, password);
       navigate('/', { replace: true });
     } catch (err) {
       setError(err.message);
@@ -35,20 +37,21 @@ export default function Login() {
         transition={{ type: 'spring', damping: 24, stiffness: 260 }}
       >
         <div className="auth-logo">
-          <div className="e">🏙️</div>
-          <h1>My Suncity Vistaar</h1>
-          <p>Your society, in your pocket</p>
+          <div className="e">🪑</div>
+          <h1>Office Bearer Sign In</h1>
+          <p>My Suncity Vistaar committee access</p>
         </div>
         {error && <div className="err-banner">{error}</div>}
         <form onSubmit={submit}>
-          <Field label="PHONE NUMBER">
+          <Field label="USERNAME">
             <input
               className="input"
-              type="tel"
-              inputMode="numeric"
-              placeholder="10-digit mobile number"
-              value={phone}
-              onChange={(e) => setPhone(e.target.value)}
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck="false"
+              placeholder="Your committee username"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
               required
             />
           </Field>
@@ -60,18 +63,10 @@ export default function Login() {
               required
             />
           </Field>
-          <p style={{ textAlign: 'right', marginTop: -6, marginBottom: 13 }}>
-            <Link to="/forgot-password" className="muted" style={{ fontSize: 13.5 }}>
-              Forgot password?
-            </Link>
-          </p>
           <Btn block disabled={busy} type="submit">
             {busy ? 'Signing in…' : 'Sign In'}
           </Btn>
         </form>
-        <p className="muted" style={{ textAlign: 'center', marginTop: 16 }}>
-          New here? <Link to="/signup">Create an account</Link>
-        </p>
       </motion.div>
     </div>
   );
