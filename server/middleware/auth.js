@@ -17,7 +17,7 @@ function authRequired(req, res, next) {
     return res.status(401).json({ error: 'Session expired, please log in again' });
   }
   const user = db
-    .prepare('SELECT id, name, phone, username, email, flat_no, role, role_detail, status FROM users WHERE id = ?')
+    .prepare('SELECT id, name, phone, username, email, flat_no, block, role, role_detail, status FROM users WHERE id = ?')
     .get(payload.id);
   if (!user || user.status !== 'approved') {
     return res.status(401).json({ error: 'Account is not active' });

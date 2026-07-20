@@ -50,6 +50,46 @@ const NOTICE_CATEGORIES = ['general', 'maintenance', 'event', 'emergency'];
 
 const COMPLAINT_STATUSES = ['open', 'in_progress', 'resolved', 'closed'];
 
+// Society blocks a resident can belong to. Order is intentional (shown as-is in
+// the signup dropdown); client/src/constants.js mirrors this list for the UI.
+const BLOCKS = [
+  'Aastha',
+  'Abhilasha',
+  'Avantika E',
+  'Avantika G',
+  'Club Premier',
+  'Executive',
+  'Royal',
+  'Vaibhav',
+  'Vatika',
+];
+
+// OAuth / OpenID Connect provider credentials. All are read from env and left
+// blank by default — a provider with blank credentials is simply "not enabled"
+// (no sign-in button, endpoints 404). See server/lib/oauth.js for the flow and
+// OAUTH_SETUP.md for what to register in each provider's console.
+const OAUTH = {
+  google: {
+    clientId: process.env.GOOGLE_OAUTH_CLIENT_ID || '',
+    clientSecret: process.env.GOOGLE_OAUTH_CLIENT_SECRET || '',
+  },
+  microsoft: {
+    clientId: process.env.MICROSOFT_OAUTH_CLIENT_ID || '',
+    clientSecret: process.env.MICROSOFT_OAUTH_CLIENT_SECRET || '',
+    // 'common' accepts any Microsoft account; set a tenant GUID to restrict to
+    // a single Entra directory.
+    tenant: process.env.MICROSOFT_OAUTH_TENANT || 'common',
+  },
+  apple: {
+    clientId: process.env.APPLE_OAUTH_SERVICES_ID || '', // the Services ID acts as the OAuth client_id
+    teamId: process.env.APPLE_OAUTH_TEAM_ID || '',
+    keyId: process.env.APPLE_OAUTH_KEY_ID || '',
+    // Contents of the .p8 private key. Env files often store the newlines
+    // escaped as literal "\n"; normalize them back to real newlines here.
+    privateKey: (process.env.APPLE_OAUTH_PRIVATE_KEY || '').replace(/\\n/g, '\n'),
+  },
+};
+
 module.exports = {
   ROOT,
   DATA_DIR,
@@ -76,4 +116,6 @@ module.exports = {
   CLEANING_CATEGORIES,
   NOTICE_CATEGORIES,
   COMPLAINT_STATUSES,
+  BLOCKS,
+  OAUTH,
 };

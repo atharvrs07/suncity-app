@@ -4,6 +4,8 @@ import { motion } from 'framer-motion';
 import { api } from '../api';
 import { useAuth } from '../auth';
 import { Btn, Field, PasswordInput } from '../components/Glass';
+import OAuthButtons from '../components/OAuthButtons';
+import { BLOCKS } from '../constants';
 
 const RESEND_COOLDOWN = 60; // seconds — mirrors the server-side resend gate
 
@@ -12,7 +14,7 @@ export default function Signup() {
   const navigate = useNavigate();
 
   const [step, setStep] = useState('form'); // 'form' → 'otp'
-  const [form, setForm] = useState({ name: '', phone: '', email: '', flat_no: '', password: '' });
+  const [form, setForm] = useState({ name: '', phone: '', email: '', flat_no: '', block: '', password: '' });
   const [otp, setOtp] = useState('');
   const [error, setError] = useState('');
   const [info, setInfo] = useState('');
@@ -195,8 +197,20 @@ export default function Signup() {
               required
             />
           </Field>
-          <Field label="FLAT / HOUSE NO. (OPTIONAL)">
-            <input className="input" value={form.flat_no} onChange={set('flat_no')} placeholder="e.g. A-101" />
+          <Field label="FLAT / HOUSE NO.">
+            <input className="input" value={form.flat_no} onChange={set('flat_no')} placeholder="e.g. A-101" required />
+          </Field>
+          <Field label="BLOCK">
+            <select className="input" value={form.block} onChange={set('block')} required>
+              <option value="" disabled>
+                Select your block
+              </option>
+              {BLOCKS.map((b) => (
+                <option key={b} value={b}>
+                  {b}
+                </option>
+              ))}
+            </select>
           </Field>
           <Field label="PASSWORD">
             <PasswordInput
@@ -210,6 +224,7 @@ export default function Signup() {
             {busy ? 'Sending code…' : 'Sign Up'}
           </Btn>
         </form>
+        <OAuthButtons label="or sign up with" />
         <p className="muted" style={{ textAlign: 'center', marginTop: 16 }}>
           Already have an account? <Link to="/login">Sign in</Link>
         </p>

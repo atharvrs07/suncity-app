@@ -5,6 +5,7 @@ import { Spinner } from './components/Glass';
 import Login from './pages/Login';
 import OBLogin from './pages/OBLogin';
 import Signup from './pages/Signup';
+import OAuthCallback from './pages/OAuthCallback';
 import ForgotPassword from './pages/ForgotPassword';
 import ResetPassword from './pages/ResetPassword';
 import Home from './pages/Home';
@@ -40,6 +41,7 @@ export default function App() {
           <Route path="/login" element={<Login />} />
           <Route path="/ob/login" element={<OBLogin />} />
           <Route path="/signup" element={<Signup />} />
+          <Route path="/oauth/callback" element={<OAuthCallback />} />
           <Route path="/forgot-password" element={<ForgotPassword />} />
           <Route path="/reset-password" element={<ResetPassword />} />
           <Route

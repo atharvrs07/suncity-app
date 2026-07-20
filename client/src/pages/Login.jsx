@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { useAuth } from '../auth';
 import { Btn, Field, PasswordInput } from '../components/Glass';
+import OAuthButtons from '../components/OAuthButtons';
 
 export default function Login() {
   const { login } = useAuth();
@@ -69,6 +70,7 @@ export default function Login() {
             {busy ? 'Signing in…' : 'Sign In'}
           </Btn>
         </form>
+        <OAuthButtons />
         <p className="muted" style={{ textAlign: 'center', marginTop: 16 }}>
           New here? <Link to="/signup">Create an account</Link>
         </p>

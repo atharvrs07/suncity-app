@@ -16,10 +16,13 @@ CREATE TABLE IF NOT EXISTS users (
   email TEXT UNIQUE,
   password_hash TEXT NOT NULL,
   flat_no TEXT,
+  block TEXT,
   role TEXT NOT NULL CHECK (role IN ('admin','office_bearer','supervisor','resident')),
   role_detail TEXT,
   status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected')),
   approved_by INTEGER,
+  oauth_provider TEXT,
+  oauth_sub TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -156,6 +159,7 @@ CREATE TABLE IF NOT EXISTS signup_otps (
   name TEXT NOT NULL,
   phone TEXT NOT NULL,
   flat_no TEXT,
+  block TEXT,
   password_hash TEXT NOT NULL,
   code_hash TEXT NOT NULL,
   expires_at TEXT NOT NULL,
@@ -216,6 +220,37 @@ function migrateUsersEmail() {
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users (email) WHERE email IS NOT NULL');
 }
 migrateUsersEmail();
+
+// Migration for DBs created before the resident-block field and OAuth sign-in
+// existed. All new columns are plain nullable, so guarded ADD COLUMNs suffice;
+// OAuth-identity uniqueness is a partial index (SQLite disallows UNIQUE in
+// ADD COLUMN). A user is matched by (oauth_provider, oauth_sub) on return
+// visits, so that pair must be unique.
+function migrateBlockAndOAuth() {
+  const userCols = db.prepare('PRAGMA table_info(users)').all().map((c) => c.name);
+  if (!userCols.includes('block')) {
+    console.log('[migrate] Adding users.block column…');
+    db.exec('ALTER TABLE users ADD COLUMN block TEXT');
+  }
+  if (!userCols.includes('oauth_provider')) {
+    console.log('[migrate] Adding users.oauth_provider column…');
+    db.exec('ALTER TABLE users ADD COLUMN oauth_provider TEXT');
+  }
+  if (!userCols.includes('oauth_sub')) {
+    console.log('[migrate] Adding users.oauth_sub column…');
+    db.exec('ALTER TABLE users ADD COLUMN oauth_sub TEXT');
+  }
+  db.exec(
+    'CREATE UNIQUE INDEX IF NOT EXISTS idx_users_oauth ON users (oauth_provider, oauth_sub) WHERE oauth_sub IS NOT NULL'
+  );
+
+  const otpCols = db.prepare('PRAGMA table_info(signup_otps)').all().map((c) => c.name);
+  if (!otpCols.includes('block')) {
+    console.log('[migrate] Adding signup_otps.block column…');
+    db.exec('ALTER TABLE signup_otps ADD COLUMN block TEXT');
+  }
+}
+migrateBlockAndOAuth();
 
 // The approval chain must never get stuck with zero admins: whenever no
 // approved admin exists, create (or promote) the fallback admin from env.

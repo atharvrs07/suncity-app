@@ -9,7 +9,7 @@ router.use(authRequired, requireRoles('admin'));
 
 router.get('/', (req, res) => {
   const users = db
-    .prepare('SELECT id, name, phone, username, email, flat_no, role, role_detail, status, created_at FROM users ORDER BY created_at DESC')
+    .prepare('SELECT id, name, phone, username, email, flat_no, block, role, role_detail, status, created_at FROM users ORDER BY created_at DESC')
     .all();
   res.json({ users });
 });

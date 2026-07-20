@@ -663,6 +663,69 @@ select.input {
   margin-top: 3px;
 }
 
+/* OAuth sign-in buttons */
+.oauth-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 18px 0 14px;
+  color: var(--ink-2);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.oauth-divider::before,
+.oauth-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: rgba(60, 70, 120, 0.14);
+}
+.oauth-btns {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.oauth-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+  padding: 11px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(60, 70, 120, 0.16);
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--ink);
+  font-size: 14.5px;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: none;
+  transition: transform 0.12s ease, box-shadow 0.12s ease, background 0.12s ease;
+}
+.oauth-btn:hover {
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 4px 14px rgba(50, 60, 120, 0.08);
+}
+.oauth-btn:active {
+  transform: scale(0.985);
+}
+.oauth-btn svg {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+/* Apple's brand guidance is a black button with a white mark. */
+.oauth-apple {
+  background: #000;
+  color: #fff;
+  border-color: #000;
+}
+.oauth-apple:hover {
+  background: #141414;
+}
+
 /* gallery grid */
 .gallery-grid {
   display: grid;

@@ -1,8 +1,10 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
+const jwt = require('jsonwebtoken');
 const db = require('../db');
 const cfg = require('../config');
+const oauth = require('../lib/oauth');
 const { sign, authRequired } = require('../middleware/auth');
 const { sendPasswordResetEmail, sendSignupOtpEmail, sendNewResidentAdminEmail } = require('../lib/mailer');
 
@@ -18,6 +20,13 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 function normalizeEmail(email) {
   const e = String(email || '').trim().toLowerCase();
   return e || null;
+}
+
+// Returns the block name exactly as listed in config, or null if it isn't one
+// of the allowed society blocks — signup is rejected in that case.
+function normalizeBlock(block) {
+  const b = String(block || '').trim();
+  return cfg.BLOCKS.includes(b) ? b : null;
 }
 
 // Simple in-memory per-IP rate limiter (resets on server restart) — shared by
@@ -82,13 +91,18 @@ router.post('/signup', (req, res) => {
   if (signupLimiter.limited(req.ip)) {
     return res.status(429).json({ error: 'Too many signup attempts. Try again in a few minutes.' });
   }
-  const { name, phone, email, password, flat_no } = req.body || {};
+  const { name, phone, email, password, flat_no, block } = req.body || {};
   const cleanName = String(name || '').trim();
   const cleanPhone = normalizePhone(phone);
   const cleanEmail = normalizeEmail(email);
+  const cleanFlat = String(flat_no || '').trim();
+  const cleanBlock = normalizeBlock(block);
+  // Every field on the resident signup form is mandatory.
   if (!cleanName) return res.status(400).json({ error: 'Name is required' });
   if (cleanPhone.length !== 10) return res.status(400).json({ error: 'Enter a valid 10-digit phone number' });
   if (!cleanEmail || !EMAIL_RE.test(cleanEmail)) return res.status(400).json({ error: 'Enter a valid email address' });
+  if (!cleanFlat) return res.status(400).json({ error: 'Flat / house number is required' });
+  if (!cleanBlock) return res.status(400).json({ error: 'Select your block' });
   if (!password || password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
 
   if (db.prepare('SELECT id FROM users WHERE phone = ?').get(cleanPhone)) {
@@ -104,13 +118,14 @@ router.post('/signup', (req, res) => {
     // A fresh signup for this email replaces any earlier in-flight one.
     db.prepare('DELETE FROM signup_otps WHERE email = ?').run(cleanEmail);
     db.prepare(
-      `INSERT INTO signup_otps (email, name, phone, flat_no, password_hash, code_hash, expires_at, last_sent_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO signup_otps (email, name, phone, flat_no, block, password_hash, code_hash, expires_at, last_sent_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       cleanEmail,
       cleanName,
       cleanPhone,
-      flat_no ? String(flat_no).trim() : null,
+      cleanFlat,
+      cleanBlock,
       bcrypt.hashSync(password, 10),
       hashOtp(code),
       new Date(now + OTP_TTL_MS).toISOString(),
@@ -179,12 +194,12 @@ router.post('/verify-signup', (req, res) => {
       }
       const info = db
         .prepare(
-          "INSERT INTO users (name, phone, email, password_hash, flat_no, role, status) VALUES (?, ?, ?, ?, ?, 'resident', 'approved')"
+          "INSERT INTO users (name, phone, email, password_hash, flat_no, block, role, status) VALUES (?, ?, ?, ?, ?, ?, 'resident', 'approved')"
         )
-        .run(row.name, row.phone, row.email, row.password_hash, row.flat_no);
+        .run(row.name, row.phone, row.email, row.password_hash, row.flat_no, row.block);
       db.prepare('DELETE FROM signup_otps WHERE email = ?').run(row.email);
       return db
-        .prepare('SELECT id, name, phone, username, email, flat_no, role, role_detail, status FROM users WHERE id = ?')
+        .prepare('SELECT id, name, phone, username, email, flat_no, block, role, role_detail, status FROM users WHERE id = ?')
         .get(info.lastInsertRowid);
     })();
   } catch (err) {
@@ -225,6 +240,172 @@ router.post('/resend-otp', (req, res) => {
   }
   // Generic response either way so a completed/absent signup can't be probed.
   res.json({ message: 'If a signup is in progress for that email, a new code has been sent.' });
+});
+
+// ---- OAuth sign-in (Google, Apple, Microsoft) ----
+// Server-side Authorization Code flow (see server/lib/oauth.js). The browser is
+// redirected to the provider and back to our callback; we verify the provider's
+// ID token and then either sign an existing resident in, or — for a brand-new
+// account — hand the browser a short-lived signed "profile" token and bounce it
+// to the complete-profile step so the mandatory fields OAuth can't supply
+// (phone, flat, block) are still collected before the account is created.
+// Whichever way it ends, the session is the same JWT the rest of the app uses,
+// so all existing RBAC middleware applies unchanged.
+
+const OAUTH_PENDING_TTL = '20m';
+
+// Bounce the browser back to the SPA with the outcome in the URL fragment
+// (fragments aren't sent to the server, so tokens stay out of access logs).
+function oauthClientRedirect(res, hashParams) {
+  const frag = new URLSearchParams(hashParams).toString();
+  res.redirect(`${cfg.APP_BASE_URL}/oauth/callback#${frag}`);
+}
+
+// Lets the client render only the buttons for providers that are configured.
+router.get('/oauth/providers', (req, res) => {
+  res.json(oauth.enabledProviders());
+});
+
+router.get('/oauth/:provider/start', (req, res) => {
+  const { provider } = req.params;
+  if (!oauth.SUPPORTED.includes(provider) || !oauth.isConfigured(provider)) {
+    return res.status(404).json({ error: 'That sign-in method is not enabled' });
+  }
+  res.redirect(oauth.authorizeUrl(provider));
+});
+
+async function handleOAuthCallback(req, res) {
+  const { provider } = req.params;
+  try {
+    if (!oauth.SUPPORTED.includes(provider) || !oauth.isConfigured(provider)) {
+      throw new Error('That sign-in method is not enabled');
+    }
+    // Google/Microsoft return via query; Apple posts a form body (form_post).
+    const params = req.method === 'POST' ? req.body || {} : req.query || {};
+    if (params.error) throw new Error(params.error_description || params.error);
+
+    const state = oauth.consumeState(params.state);
+    if (!state || state.provider !== provider) {
+      throw new Error('Your sign-in session expired. Please try again.');
+    }
+    if (!params.code) throw new Error('No authorization code was returned');
+
+    const tokens = await oauth.exchangeCode(provider, params.code);
+    const claims = await oauth.verifyIdToken(provider, tokens.id_token, state.nonce);
+    const identity = oauth.extractIdentity(provider, claims, params);
+    if (!identity.sub) throw new Error('Could not read your account identity');
+    if (!identity.email) throw new Error('Your account did not share a verified email address');
+
+    // Match an existing account by the provider identity first, then fall back
+    // to a verified email (account linking). Record the identity on first link.
+    let user = db
+      .prepare('SELECT * FROM users WHERE oauth_provider = ? AND oauth_sub = ?')
+      .get(provider, identity.sub);
+    if (!user) {
+      const byEmail = db.prepare('SELECT * FROM users WHERE email = ?').get(identity.email);
+      if (byEmail) {
+        if (!byEmail.oauth_provider) {
+          db.prepare('UPDATE users SET oauth_provider = ?, oauth_sub = ? WHERE id = ?').run(
+            provider,
+            identity.sub,
+            byEmail.id
+          );
+        }
+        user = byEmail;
+      }
+    }
+
+    if (user) {
+      if (user.status !== 'approved') {
+        return oauthClientRedirect(res, { error: 'Your account is not active. Contact the society office.' });
+      }
+      return oauthClientRedirect(res, { token: sign(user) });
+    }
+
+    // Brand-new account — collect the mandatory profile fields first. The signed
+    // token carries the verified identity so it can't be tampered with.
+    const pending = jwt.sign(
+      { purpose: 'oauth_signup', provider, sub: identity.sub, email: identity.email, name: identity.name },
+      cfg.JWT_SECRET,
+      { expiresIn: OAUTH_PENDING_TTL }
+    );
+    return oauthClientRedirect(res, { pending, email: identity.email, name: identity.name });
+  } catch (err) {
+    console.error(`[oauth] ${provider} callback failed:`, err.message);
+    return oauthClientRedirect(res, { error: err.message || 'Sign-in failed. Please try again.' });
+  }
+}
+
+router.get('/oauth/:provider/callback', (req, res) => handleOAuthCallback(req, res));
+// Apple posts back with response_mode=form_post; parse that body for this route
+// (the global express.json() doesn't handle urlencoded).
+router.post('/oauth/:provider/callback', express.urlencoded({ extended: false }), (req, res) =>
+  handleOAuthCallback(req, res)
+);
+
+// Finish an OAuth signup: verify the pending profile token, enforce the same
+// mandatory fields as password signup, create the approved resident, and issue
+// the app session. OAuth users get an unusable random password (they sign in
+// via the provider); they can set one later via "forgot password" if they want
+// phone login too.
+router.post('/oauth/complete', (req, res) => {
+  const { pending_token, name, phone, flat_no, block } = req.body || {};
+  let claims;
+  try {
+    claims = jwt.verify(String(pending_token || ''), cfg.JWT_SECRET);
+  } catch {
+    return res.status(400).json({ error: 'Your sign-in session expired. Please start again.' });
+  }
+  if (claims.purpose !== 'oauth_signup') {
+    return res.status(400).json({ error: 'Invalid sign-in session' });
+  }
+
+  const cleanName = String(name || claims.name || '').trim();
+  const cleanPhone = normalizePhone(phone);
+  const cleanFlat = String(flat_no || '').trim();
+  const cleanBlock = normalizeBlock(block);
+  const cleanEmail = normalizeEmail(claims.email);
+  if (!cleanName) return res.status(400).json({ error: 'Name is required' });
+  if (cleanPhone.length !== 10) return res.status(400).json({ error: 'Enter a valid 10-digit phone number' });
+  if (!cleanFlat) return res.status(400).json({ error: 'Flat / house number is required' });
+  if (!cleanBlock) return res.status(400).json({ error: 'Select your block' });
+  if (!cleanEmail) return res.status(400).json({ error: 'Missing email from sign-in. Please start again.' });
+
+  let user;
+  try {
+    user = db.transaction(() => {
+      if (db.prepare('SELECT id FROM users WHERE oauth_provider = ? AND oauth_sub = ?').get(claims.provider, claims.sub)) {
+        const e = new Error('This account has already been set up. Please sign in.');
+        e.status = 409;
+        throw e;
+      }
+      if (db.prepare('SELECT id FROM users WHERE phone = ?').get(cleanPhone)) {
+        const e = new Error('An account with this phone number already exists');
+        e.status = 409;
+        throw e;
+      }
+      if (db.prepare('SELECT id FROM users WHERE email = ?').get(cleanEmail)) {
+        const e = new Error('An account with this email already exists');
+        e.status = 409;
+        throw e;
+      }
+      const placeholderPassword = bcrypt.hashSync(crypto.randomBytes(24).toString('hex'), 10);
+      const info = db
+        .prepare(
+          `INSERT INTO users (name, phone, email, password_hash, flat_no, block, role, status, oauth_provider, oauth_sub)
+           VALUES (?, ?, ?, ?, ?, ?, 'resident', 'approved', ?, ?)`
+        )
+        .run(cleanName, cleanPhone, cleanEmail, placeholderPassword, cleanFlat, cleanBlock, claims.provider, claims.sub);
+      return db
+        .prepare('SELECT id, name, phone, username, email, flat_no, block, role, role_detail, status FROM users WHERE id = ?')
+        .get(info.lastInsertRowid);
+    })();
+  } catch (err) {
+    return res.status(err.status || 500).json({ error: err.message || 'Could not create your account' });
+  }
+
+  notifyAdminsNewResident(user).catch((e) => console.error('[notify] admin notification failed:', e.message));
+  res.status(201).json({ token: sign(user), user });
 });
 
 router.post('/login', (req, res) => {
@@ -290,7 +471,7 @@ router.patch('/me', authRequired, (req, res) => {
     req.user.id
   );
   const user = db
-    .prepare('SELECT id, name, phone, username, email, flat_no, role, role_detail, status FROM users WHERE id = ?')
+    .prepare('SELECT id, name, phone, username, email, flat_no, block, role, role_detail, status FROM users WHERE id = ?')
     .get(req.user.id);
   res.json({ user });
 });

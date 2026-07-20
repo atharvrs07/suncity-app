@@ -37,13 +37,24 @@ export function AuthProvider({ children }) {
     return u;
   }, []);
 
+  // Adopt a bare session token (e.g. returned by the OAuth callback in the URL
+  // fragment) and hydrate the user from the API.
+  const loginWithToken = useCallback(async (token) => {
+    setToken(token);
+    const d = await api('/api/auth/me');
+    setUser(d.user);
+    return d.user;
+  }, []);
+
   const logout = useCallback(() => {
     clearToken();
     setUser(null);
   }, []);
 
   return (
-    <AuthContext.Provider value={{ user, setUser, loading, login, obLogin, completeSignup, logout }}>
+    <AuthContext.Provider
+      value={{ user, setUser, loading, login, obLogin, completeSignup, loginWithToken, logout }}
+    >
       {children}
     </AuthContext.Provider>
   );

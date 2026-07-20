@@ -3,7 +3,7 @@ import { api, fmtMoney } from '../api';
 import { useFetch } from '../hooks';
 import { useAuth } from '../auth';
 import { GlassCard, Btn, Chip, Field, Toggle, Sheet, Segmented, Empty, Spinner, StaggerList, StaggerItem } from '../components/Glass';
-import { roleLabel } from '../constants';
+import { roleLabel, BLOCKS } from '../constants';
 
 const TABS = [
   { value: 'automations', label: 'Automated Dues' },
@@ -214,6 +214,7 @@ function UsersTab() {
   const { data, loading, reload } = useFetch('/api/users');
   const [resetResult, setResetResult] = useState(null); // { user, password }
   const [copied, setCopied] = useState(false);
+  const [blockFilter, setBlockFilter] = useState('all');
 
   async function setStatus(u, status) {
     const verb = status === 'approved' ? 'Enable' : 'Disable';
@@ -249,11 +250,37 @@ function UsersTab() {
 
   if (loading) return <Spinner />;
 
+  const allUsers = data ? data.users : [];
+  const visible = blockFilter === 'all' ? allUsers : allUsers.filter((u) => u.block === blockFilter);
+
   return (
     <>
+      <div className="row-between" style={{ marginBottom: 12, gap: 10 }}>
+        <p className="muted">
+          {visible.length} {visible.length === 1 ? 'account' : 'accounts'}
+          {blockFilter !== 'all' ? ` in ${blockFilter}` : ''}
+        </p>
+        <select
+          className="input"
+          style={{ width: 'auto', maxWidth: 190 }}
+          value={blockFilter}
+          onChange={(e) => setBlockFilter(e.target.value)}
+        >
+          <option value="all">All blocks</option>
+          {BLOCKS.map((b) => (
+            <option key={b} value={b}>
+              {b}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {visible.length === 0 && (
+        <Empty emoji="🏢" title="No accounts in this block" sub="Try a different block or clear the filter." />
+      )}
+
       <StaggerList>
-        {data &&
-          data.users.map((u) => (
+        {visible.map((u) => (
             <StaggerItem key={u.id}>
               <GlassCard>
                 <div className="row-between">
@@ -268,6 +295,7 @@ function UsersTab() {
                 <p className="muted" style={{ marginTop: 4 }}>
                   {roleLabel(u)} · {u.phone ? `📱 ${u.phone}` : `@${u.username || '—'}`}
                   {u.email ? ` · ✉️ ${u.email}` : ''}
+                  {u.block ? ` · 🏢 ${u.block}` : ''}
                   {u.flat_no ? ` · Flat ${u.flat_no}` : ''}
                 </p>
                 <div className="row" style={{ marginTop: 9 }}>

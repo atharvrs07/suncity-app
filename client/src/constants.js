@@ -59,6 +59,20 @@ export const SUPERVISOR_ROLES = [
   { value: 'cleaning', label: 'Cleaning Supervisor' },
 ];
 
+// Society blocks — mirrors server/config.js BLOCKS (keep the two in sync).
+// Order is intentional and shown as-is in the signup / profile dropdowns.
+export const BLOCKS = [
+  'Aastha',
+  'Abhilasha',
+  'Avantika E',
+  'Avantika G',
+  'Club Premier',
+  'Executive',
+  'Royal',
+  'Vaibhav',
+  'Vatika',
+];
+
 export function roleLabel(user) {
   if (!user) return '';
   if (user.role === 'admin') return 'Admin';

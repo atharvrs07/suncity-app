@@ -78,13 +78,14 @@ function sendSignupOtpEmail({ to, name, otp, expiryMinutes = 10 }) {
 
 function sendNewResidentAdminEmail({ to, adminName, resident }) {
   const subject = 'New resident joined — My Suncity Vistaar';
+  const block = resident.block ? `\nBlock: ${resident.block}` : '';
   const flat = resident.flat_no ? `\nFlat: ${resident.flat_no}` : '';
   const text =
     `Hi ${adminName || 'Admin'},\n\n` +
     `A new resident just verified their email and joined My Suncity Vistaar.\n\n` +
     `Name: ${resident.name}\n` +
     `Email: ${resident.email}\n` +
-    `Phone: ${resident.phone}${flat}\n\n` +
+    `Phone: ${resident.phone}${block}${flat}\n\n` +
     `Their account is already active — no approval is required for resident signups.\n\n` +
     `— My Suncity Vistaar`;
   const html = `
@@ -97,6 +98,7 @@ function sendNewResidentAdminEmail({ to, adminName, resident }) {
       <tr><td style="padding:4px 12px 4px 0;color:#5d6175;">Name</td><td style="padding:4px 0;font-weight:600;">${resident.name}</td></tr>
       <tr><td style="padding:4px 12px 4px 0;color:#5d6175;">Email</td><td style="padding:4px 0;font-weight:600;">${resident.email}</td></tr>
       <tr><td style="padding:4px 12px 4px 0;color:#5d6175;">Phone</td><td style="padding:4px 0;font-weight:600;">${resident.phone}</td></tr>
+      ${resident.block ? `<tr><td style="padding:4px 12px 4px 0;color:#5d6175;">Block</td><td style="padding:4px 0;font-weight:600;">${resident.block}</td></tr>` : ''}
       ${resident.flat_no ? `<tr><td style="padding:4px 12px 4px 0;color:#5d6175;">Flat</td><td style="padding:4px 0;font-weight:600;">${resident.flat_no}</td></tr>` : ''}
     </table>
     <p style="color:#5d6175;font-size:13px;">Their account is already active — no approval is required for resident signups.</p>

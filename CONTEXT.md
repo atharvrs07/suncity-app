@@ -118,10 +118,10 @@ provisioned outside this flow (office bearers via `seed-office-bearers.js` + hid
 admins via the env seed / `ensureSeedAdmin`) — that path is untouched, and the Approvals
 screen + approval chain remain for it.
 
-- **Flow**: `POST /api/auth/signup` (name, phone, email, flat_no, password — email now
-  required) validates + checks phone/email uniqueness, then stashes the details (password
-  bcrypt-hashed) and a SHA-256-hashed 6-digit code in the new `signup_otps` table (10-min
-  expiry) and emails the code. **No user row is created yet.** `POST /api/auth/verify-signup`
+- **Flow**: `POST /api/auth/signup` (name, phone, email, flat_no, block, password — all now
+  required; see the mandatory-fields section below) validates + checks phone/email uniqueness,
+  then stashes the details (password bcrypt-hashed) and a SHA-256-hashed 6-digit code in the
+  new `signup_otps` table (10-min expiry) and emails the code. **No user row is created yet.** `POST /api/auth/verify-signup`
   (email + otp) checks the code, creates the approved resident inside a transaction (re-guards
   uniqueness), consumes the OTP row, notifies admins, and returns `{ token, user }` — the
   client logs straight in. `POST /api/auth/resend-otp` regenerates the code.
@@ -141,6 +141,48 @@ screen + approval chain remain for it.
   phone login works→admin emailed), wrong-code attempts-left, resend cooldown 429, expired-code
   rejection+cleanup, replay/duplicate-email/short-password/missing-email rejection, generic
   resend for unknown email.
+
+## Mandatory signup fields, resident block & OAuth sign-in (added 2026-07-20)
+
+- **All resident signup fields are now mandatory.** `flat_no` (previously
+  optional) is required, and a new required **block** field is added. Enforced
+  both client-side (`required` inputs/select in `Signup.jsx`) and server-side in
+  `POST /api/auth/signup` (and again in `/verify-signup` via the stashed row).
+- **Block**: one of 9 society blocks — `Aastha, Abhilasha, Avantika E,
+  Avantika G, Club Premier, Executive, Royal, Vaibhav, Vatika` (order is fixed).
+  Single source of truth is `BLOCKS` in `server/config.js`, mirrored in
+  `client/src/constants.js`. Stored as `users.block` (nullable column +
+  `signup_otps.block`, added by the idempotent `migrateBlockAndOAuth()` in
+  `db.js`). Server rejects any block not in the list. Surfaced on the admin
+  **Users** list: each card shows 🏢 block and there's a **filter-by-block**
+  dropdown.
+- **OAuth sign-in (Google, Microsoft, Apple)** — server-side Authorization Code
+  flow, no browser SDKs, **no new npm dependencies** (ID tokens verified with
+  Node `crypto` JWK import + the existing `jsonwebtoken`; requires Node 18+).
+  - `server/lib/oauth.js`: provider metadata, in-memory CSRF `state`+`nonce`
+    store, authorize-URL builder, code→token exchange, JWKS cache + ID-token
+    verification (iss/aud/exp/nonce; Microsoft issuer validated against the
+    token's `tid`), Apple client-secret JWT (ES256, signed from the `.p8`).
+  - Routes on `/api/auth` (in `routes/auth.js`): `GET /oauth/providers`
+    (which are enabled → client renders only those buttons), `GET
+    /oauth/:provider/start` (redirects to provider), `GET`+`POST
+    /oauth/:provider/callback` (Apple uses `form_post`), `POST /oauth/complete`.
+  - Callback bounces the browser to the SPA route `/oauth/callback` with the
+    result in the URL **fragment**: `#token=<jwt>` (existing/linked account →
+    straight in) or `#pending=<jwt>&email=&name=` (new account) or
+    `#error=<msg>`. New accounts hit a **"Complete your profile"** step
+    (`OAuthCallback.jsx`) that collects the mandatory fields OAuth can't supply
+    (phone, flat, block) before creating the **approved** resident. OAuth users
+    get a random unusable password (they can set one via forgot-password for
+    phone login). Accounts are matched by `(oauth_provider, oauth_sub)` — unique
+    partial index `idx_users_oauth` — then linked by verified email.
+  - Config/env: `OAUTH` in `config.js` reads `GOOGLE_OAUTH_*`,
+    `MICROSOFT_OAUTH_*` (+ `MICROSOFT_OAUTH_TENANT`, default `common`),
+    `APPLE_OAUTH_*`. All blank by default (provider off, button hidden).
+    `APP_BASE_URL` must be the public origin (redirect URIs are built from it).
+    **See `OAUTH_SETUP.md`** for what to register in each provider's console
+    (redirect URIs, Services ID/keys, tenant). Apple can't use localhost/http —
+    needs a deployed HTTPS host.
 
 ## Key invariants (enforce on any change)
 
