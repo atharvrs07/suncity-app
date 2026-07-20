@@ -32,6 +32,14 @@ GMAIL_USER / GMAIL_APP_PASSWORD (password-reset emails; blank app password → l
 console) and optional APP_BASE_URL for emailed links (see .env.example).
 SQLite DB + uploads live in `data/` (override with DATA_DIR for persistent hosting).
 
+**⚠️ Data persistence (see `DEPLOYMENT.md`):** all data (accounts + every module) is the
+single SQLite file at `$DATA_DIR/suncity.db`, plus `$DATA_DIR/uploads/`. `DATA_DIR` MUST point
+at a persistent volume on the host, or every redeploy starts from an empty DB and all data is
+lost. Deploys are otherwise non-destructive (schema is `CREATE IF NOT EXISTS`, migrations are
+idempotent, seed admin only created when zero approved admins exist). `.dockerignore` keeps the
+local `data/` out of any built image. `server/reset-data.js` (`npm run reset-data`, dry-run
+unless `--yes`; `--wipe-users` to also clear accounts) gives a clean launch slate on the host.
+
 ### Local dev accounts (created during smoke tests)
 
 - Admin (seeded): phone `9999999999` / `admin123`
@@ -183,6 +191,76 @@ screen + approval chain remain for it.
     **See `OAUTH_SETUP.md`** for what to register in each provider's console
     (redirect URIs, Services ID/keys, tenant). Apple can't use localhost/http —
     needs a deployed HTTPS host.
+
+## Loading screen, logo, dependent House No., staged signup, disposable-email guard (added 2026-07-20)
+
+- **App loading screen**: `client/src/components/SplashScreen.jsx` — full-viewport
+  image shown for **3s** on first app load then fades out (framer-motion). `<picture>`
+  serves the 9:16 image on mobile and the 16:9 image on desktop (`min-width:768px`).
+  No skip button — instead a **pixel-art loading bar** (chunky white frame + hard
+  drop-shadow, segmented "blocky" fill, blinking `LOADING…` label; `.splash-bar*` in
+  styles.css) animates 0→100% over the 3s to match the pixel-art splash art. Wired via
+  a `SplashGate` in `App.jsx` that overlays the splash while the app mounts underneath.
+  Assets live in `client/public/imgs/` (Vite copies `public/` → `dist/`, so the
+  single-process server serves them).
+- **Logo**: the provided 1:1 `logo.png` replaces the old 🏙️ emoji placeholders —
+  favicon + apple-touch-icon (`client/index.html`), drawer brand (`Layout.jsx`),
+  and the auth-screen headers on Login / Signup / OAuth complete-profile
+  (`.auth-logo-img`, `.drawer-brand .brand-logo` in styles.css). NOTE: the source
+  PNGs are large (~5–6 MB each); fine functionally but worth optimizing later.
+- **Dependent House No. dropdown**: source of truth is project-root
+  `block-house-numbers.json` (block → house-number list). Server reads it via
+  `server/lib/houseNumbers.js` (`isValidHouseNo`); the client fetches the same map
+  from the new public `GET /api/meta/house-numbers` (`server/routes/meta.js`) and
+  caches it (`client/src/houseNumbers.js`). `client/src/components/BlockHousePicker.jsx`
+  renders Block + House No. selects — House No. is disabled until a Block is chosen,
+  lists only that block's numbers, and clears when the Block changes. Used by both
+  Signup and the OAuth complete-profile step. New nullable column `users.house_no`
+  (+ `signup_otps.house_no`), added by idempotent `migrateHouseNo()`. On signup the
+  selected house number is stored in `house_no` **and** mirrored into `flat_no` so
+  every existing `flat_no` display (admin Users list, complaint/lost-found cards)
+  keeps working. The free-text flat field is gone from both signup forms. Server
+  validates `house_no ∈ block`.
+- **Staged signup form** (`Signup.jsx`): fields reveal progressively — Name →
+  (Block + House No.) → (email, phone, password). Purely presentational; all fields
+  remain required client- and server-side (`/api/auth/signup` re-validates every one).
+- **Disposable-email guard + MX check** (manual signup only; OAuth emails are
+  provider-verified and skip it): `server/lib/emailValidation.js` uses the maintained
+  npm `disposable-email-domains` list (refresh via `npm update`) — a temp-mail domain
+  is rejected with "Please use a permanent email address" **before any OTP is sent**;
+  then the domain must publish MX records (`dns.resolveMx`) or it's rejected. A
+  transient resolver failure returns 503 (can't verify right now). Reuses the existing
+  `signup_otps` OTP infra + Gmail mailer. Rate limiting: existing per-IP limiters plus
+  a per-email resend cooldown on `/signup`. (Offline/dev note: with no DNS the MX step
+  returns 503, so a full happy-path signup needs a network-connected host.)
+- **Complaint image upload**: already present (server `upload.single('photo')`,
+  `complaints.photo`, file input on the form, image shown in the shared detail sheet
+  for residents and managers) — verified, no change needed.
+- **Lost & Found**: already existed; its post form was reordered to the requested
+  flow — photo (optional) → item name (required) → description (**now required**,
+  enforced server-side) → then type/location/contact.
+
+## Admin account management (added 2026-07-20)
+
+Admins can edit and delete accounts from **Admin → Users** (`client/src/pages/Admin.jsx`,
+`UsersTab`). Both routes are admin-only (the whole `server/routes/users.js` router is gated
+by `requireRoles('admin')`).
+
+- **Edit any account** — `PATCH /api/users/:id`. Each field is optional (only keys present
+  in the body are touched); everything is validated up front, then applied in one transaction.
+  Editable: `name`, `phone` (10 digits, unique; can't be cleared on a phone-login account),
+  `email` (valid + unique, or blank to clear), `block`+`house_no` (re-validated as a pair via
+  `isValidHouseNo`, and `flat_no` re-mirrored), and an optional new `password` (≥6 chars — set
+  directly, and it invalidates any outstanding self-service reset tokens). The client "✏️ Edit"
+  button opens a Sheet that sends only changed fields; the Block/House picker shows only for
+  residents.
+- **Delete a resident** — `DELETE /api/users/:id`. **Residents only** (office-bearer / admin /
+  supervisor accounts are provisioned outside signup and can't be deleted here → 400); can't
+  delete yourself → 400. Cascades in one transaction: the resident's payments + due_extensions
+  (by user_id and by their dues' ids), dues, complaints, lost & found posts, and password-reset
+  tokens, then the user row. Danger button lives at the bottom of the Edit sheet (residents only).
+- The existing **🔑 Reset Password** (random, shown once) is unchanged and kept alongside Edit.
+- Both actions write an `[audit]` log line naming the acting admin and target.
 
 ## Key invariants (enforce on any change)
 

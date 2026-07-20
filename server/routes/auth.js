@@ -7,6 +7,8 @@ const cfg = require('../config');
 const oauth = require('../lib/oauth');
 const { sign, authRequired } = require('../middleware/auth');
 const { sendPasswordResetEmail, sendSignupOtpEmail, sendNewResidentAdminEmail } = require('../lib/mailer');
+const { isValidHouseNo } = require('../lib/houseNumbers');
+const { isDisposableEmail, hasMxRecords } = require('../lib/emailValidation');
 
 const router = express.Router();
 
@@ -87,23 +89,43 @@ function notifyAdminsNewResident(resident) {
   );
 }
 
-router.post('/signup', (req, res) => {
+router.post('/signup', async (req, res) => {
   if (signupLimiter.limited(req.ip)) {
     return res.status(429).json({ error: 'Too many signup attempts. Try again in a few minutes.' });
   }
-  const { name, phone, email, password, flat_no, block } = req.body || {};
+  const { name, phone, email, password, block, house_no } = req.body || {};
   const cleanName = String(name || '').trim();
   const cleanPhone = normalizePhone(phone);
   const cleanEmail = normalizeEmail(email);
-  const cleanFlat = String(flat_no || '').trim();
   const cleanBlock = normalizeBlock(block);
-  // Every field on the resident signup form is mandatory.
+  const cleanHouseNo = String(house_no || '').trim();
+  // Every field on the resident signup form is mandatory (the staged reveal on
+  // the client is presentation only — all fields are still required here).
   if (!cleanName) return res.status(400).json({ error: 'Name is required' });
-  if (cleanPhone.length !== 10) return res.status(400).json({ error: 'Enter a valid 10-digit phone number' });
-  if (!cleanEmail || !EMAIL_RE.test(cleanEmail)) return res.status(400).json({ error: 'Enter a valid email address' });
-  if (!cleanFlat) return res.status(400).json({ error: 'Flat / house number is required' });
   if (!cleanBlock) return res.status(400).json({ error: 'Select your block' });
+  if (!cleanHouseNo) return res.status(400).json({ error: 'Select your house number' });
+  // The house number must belong to the chosen block (source of truth is
+  // block-house-numbers.json, shared with the client).
+  if (!isValidHouseNo(cleanBlock, cleanHouseNo)) {
+    return res.status(400).json({ error: 'Select a house number that belongs to your block' });
+  }
+  if (!cleanEmail || !EMAIL_RE.test(cleanEmail)) return res.status(400).json({ error: 'Enter a valid email address' });
+  if (cleanPhone.length !== 10) return res.status(400).json({ error: 'Enter a valid 10-digit phone number' });
   if (!password || password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
+
+  // Block disposable / temp-mail domains outright — before any OTP is sent.
+  if (isDisposableEmail(cleanEmail)) {
+    return res.status(400).json({ error: 'Please use a permanent email address' });
+  }
+  // The domain must actually be able to receive mail (publishes MX records).
+  try {
+    if (!(await hasMxRecords(cleanEmail))) {
+      return res.status(400).json({ error: "This email domain can't receive mail — please check the address." });
+    }
+  } catch (err) {
+    console.error('[signup] MX lookup failed:', err.message);
+    return res.status(503).json({ error: 'Could not verify your email domain right now. Please try again in a moment.' });
+  }
 
   if (db.prepare('SELECT id FROM users WHERE phone = ?').get(cleanPhone)) {
     return res.status(409).json({ error: 'An account with this phone number already exists' });
@@ -112,20 +134,32 @@ router.post('/signup', (req, res) => {
     return res.status(409).json({ error: 'An account with this email already exists' });
   }
 
+  // Per-email throttle: don't fire a fresh code if one was just sent to this
+  // address (complements the per-IP limiter above).
+  const existing = db.prepare('SELECT last_sent_at FROM signup_otps WHERE email = ?').get(cleanEmail);
+  if (existing) {
+    const sinceLast = Date.now() - new Date(existing.last_sent_at).getTime();
+    if (sinceLast < OTP_RESEND_COOLDOWN_MS) {
+      const wait = Math.ceil((OTP_RESEND_COOLDOWN_MS - sinceLast) / 1000);
+      return res.status(429).json({ error: `A code was just sent to that email. Please wait ${wait}s before trying again.` });
+    }
+  }
+
   const code = genOtp();
   const now = Date.now();
   db.transaction(() => {
     // A fresh signup for this email replaces any earlier in-flight one.
     db.prepare('DELETE FROM signup_otps WHERE email = ?').run(cleanEmail);
     db.prepare(
-      `INSERT INTO signup_otps (email, name, phone, flat_no, block, password_hash, code_hash, expires_at, last_sent_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO signup_otps (email, name, phone, flat_no, block, house_no, password_hash, code_hash, expires_at, last_sent_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       cleanEmail,
       cleanName,
       cleanPhone,
-      cleanFlat,
+      cleanHouseNo, // flat_no mirrors the structured house number so existing displays keep working
       cleanBlock,
+      cleanHouseNo,
       bcrypt.hashSync(password, 10),
       hashOtp(code),
       new Date(now + OTP_TTL_MS).toISOString(),
@@ -194,12 +228,12 @@ router.post('/verify-signup', (req, res) => {
       }
       const info = db
         .prepare(
-          "INSERT INTO users (name, phone, email, password_hash, flat_no, block, role, status) VALUES (?, ?, ?, ?, ?, ?, 'resident', 'approved')"
+          "INSERT INTO users (name, phone, email, password_hash, flat_no, block, house_no, role, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'resident', 'approved')"
         )
-        .run(row.name, row.phone, row.email, row.password_hash, row.flat_no, row.block);
+        .run(row.name, row.phone, row.email, row.password_hash, row.flat_no, row.block, row.house_no);
       db.prepare('DELETE FROM signup_otps WHERE email = ?').run(row.email);
       return db
-        .prepare('SELECT id, name, phone, username, email, flat_no, block, role, role_detail, status FROM users WHERE id = ?')
+        .prepare('SELECT id, name, phone, username, email, flat_no, block, house_no, role, role_detail, status FROM users WHERE id = ?')
         .get(info.lastInsertRowid);
     })();
   } catch (err) {
@@ -349,7 +383,7 @@ router.post('/oauth/:provider/callback', express.urlencoded({ extended: false })
 // via the provider); they can set one later via "forgot password" if they want
 // phone login too.
 router.post('/oauth/complete', (req, res) => {
-  const { pending_token, name, phone, flat_no, block } = req.body || {};
+  const { pending_token, name, phone, block, house_no } = req.body || {};
   let claims;
   try {
     claims = jwt.verify(String(pending_token || ''), cfg.JWT_SECRET);
@@ -362,13 +396,16 @@ router.post('/oauth/complete', (req, res) => {
 
   const cleanName = String(name || claims.name || '').trim();
   const cleanPhone = normalizePhone(phone);
-  const cleanFlat = String(flat_no || '').trim();
   const cleanBlock = normalizeBlock(block);
+  const cleanHouseNo = String(house_no || '').trim();
   const cleanEmail = normalizeEmail(claims.email);
   if (!cleanName) return res.status(400).json({ error: 'Name is required' });
   if (cleanPhone.length !== 10) return res.status(400).json({ error: 'Enter a valid 10-digit phone number' });
-  if (!cleanFlat) return res.status(400).json({ error: 'Flat / house number is required' });
   if (!cleanBlock) return res.status(400).json({ error: 'Select your block' });
+  if (!cleanHouseNo) return res.status(400).json({ error: 'Select your house number' });
+  if (!isValidHouseNo(cleanBlock, cleanHouseNo)) {
+    return res.status(400).json({ error: 'Select a house number that belongs to your block' });
+  }
   if (!cleanEmail) return res.status(400).json({ error: 'Missing email from sign-in. Please start again.' });
 
   let user;
@@ -392,12 +429,12 @@ router.post('/oauth/complete', (req, res) => {
       const placeholderPassword = bcrypt.hashSync(crypto.randomBytes(24).toString('hex'), 10);
       const info = db
         .prepare(
-          `INSERT INTO users (name, phone, email, password_hash, flat_no, block, role, status, oauth_provider, oauth_sub)
-           VALUES (?, ?, ?, ?, ?, ?, 'resident', 'approved', ?, ?)`
+          `INSERT INTO users (name, phone, email, password_hash, flat_no, block, house_no, role, status, oauth_provider, oauth_sub)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'resident', 'approved', ?, ?)`
         )
-        .run(cleanName, cleanPhone, cleanEmail, placeholderPassword, cleanFlat, cleanBlock, claims.provider, claims.sub);
+        .run(cleanName, cleanPhone, cleanEmail, placeholderPassword, cleanHouseNo, cleanBlock, cleanHouseNo, claims.provider, claims.sub);
       return db
-        .prepare('SELECT id, name, phone, username, email, flat_no, block, role, role_detail, status FROM users WHERE id = ?')
+        .prepare('SELECT id, name, phone, username, email, flat_no, block, house_no, role, role_detail, status FROM users WHERE id = ?')
         .get(info.lastInsertRowid);
     })();
   } catch (err) {
@@ -471,7 +508,7 @@ router.patch('/me', authRequired, (req, res) => {
     req.user.id
   );
   const user = db
-    .prepare('SELECT id, name, phone, username, email, flat_no, block, role, role_detail, status FROM users WHERE id = ?')
+    .prepare('SELECT id, name, phone, username, email, flat_no, block, house_no, role, role_detail, status FROM users WHERE id = ?')
     .get(req.user.id);
   res.json({ user });
 });

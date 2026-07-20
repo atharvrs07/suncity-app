@@ -12,6 +12,7 @@ app.use(express.json());
 
 app.use('/uploads', express.static(cfg.UPLOADS_DIR, { maxAge: '7d' }));
 
+app.use('/api/meta', require('./routes/meta'));
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/approvals', require('./routes/approvals'));
 app.use('/api/users', require('./routes/users'));
@@ -46,7 +47,28 @@ app.use((err, req, res, next) => {
   });
 });
 
+// Warn loudly at boot if the database is being stored inside the app folder.
+// On most hosts that folder is replaced on every deploy, so the DB (accounts +
+// all data) would be wiped each roll-out. The fix is to set DATA_DIR to a
+// persistent path OUTSIDE the app directory — see DEPLOYMENT.md.
+function reportDataDir() {
+  const dataDir = path.resolve(cfg.DATA_DIR);
+  const root = path.resolve(cfg.ROOT);
+  const insideApp = dataDir === root || dataDir.startsWith(root + path.sep);
+  console.log(`Data directory (DATA_DIR): ${dataDir}`);
+  if (insideApp) {
+    console.warn(
+      '⚠️  DATA_DIR is INSIDE the app folder. If your host replaces this folder on deploy,\n' +
+        '    the database and all data will be LOST on the next roll-out. Set DATA_DIR to a\n' +
+        '    persistent directory outside the app folder (see DEPLOYMENT.md).'
+    );
+  } else {
+    console.log('✓ DATA_DIR is outside the app folder — data will persist across deploys.');
+  }
+}
+
 app.listen(cfg.PORT, () => {
   console.log(`My Suncity Vistaar server running on http://localhost:${cfg.PORT}`);
+  reportDataDir();
   startCron();
 });

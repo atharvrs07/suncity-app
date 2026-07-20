@@ -45,7 +45,7 @@ export default function Layout() {
               transition={{ type: 'spring', damping: 30, stiffness: 300 }}
             >
               <div className="drawer-brand">
-                <span className="logo">🏙️</span>
+                <img className="brand-logo" src="/imgs/logo.png" alt="" />
                 <div>
                   <div className="name">My Suncity Vistaar</div>
                   <div className="tag">Society, simplified</div>

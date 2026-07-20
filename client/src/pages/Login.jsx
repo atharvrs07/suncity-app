@@ -36,7 +36,7 @@ export default function Login() {
         transition={{ type: 'spring', damping: 24, stiffness: 260 }}
       >
         <div className="auth-logo">
-          <div className="e">🏙️</div>
+          <img className="auth-logo-img" src="/imgs/logo.png" alt="My Suncity Vistaar" />
           <h1>My Suncity Vistaar</h1>
           <p>Your society, in your pocket</p>
         </div>

@@ -1,0 +1,12 @@
+# Keep runtime data, secrets, and local build artifacts OUT of any Docker image.
+# Critically, `data/` must never be baked into an image — if it were, every
+# deploy would ship a stale database and overwrite the live one on the host.
+node_modules
+client/node_modules
+client/dist
+data
+.env
+office-bearer-credentials.txt
+.git
+*.log
+npm-debug.log*

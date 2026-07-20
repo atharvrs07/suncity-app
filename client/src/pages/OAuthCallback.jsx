@@ -4,7 +4,7 @@ import { motion } from 'framer-motion';
 import { api } from '../api';
 import { useAuth } from '../auth';
 import { Btn, Field, Spinner } from '../components/Glass';
-import { BLOCKS } from '../constants';
+import BlockHousePicker from '../components/BlockHousePicker';
 
 // Landing route for the server-side OAuth flow. The server bounces the browser
 // here with the outcome in the URL fragment:
@@ -24,7 +24,7 @@ export default function OAuthCallback() {
   const [mode, setMode] = useState('loading'); // 'loading' | 'complete' | 'error'
   const [error, setError] = useState('');
   const [prefillEmail, setPrefillEmail] = useState('');
-  const [form, setForm] = useState({ name: '', phone: '', flat_no: '', block: '' });
+  const [form, setForm] = useState({ name: '', phone: '', block: '', house_no: '' });
   const [busy, setBusy] = useState(false);
   const pendingToken = useRef(null);
 
@@ -124,7 +124,7 @@ export default function OAuthCallback() {
         transition={{ type: 'spring', damping: 24, stiffness: 260 }}
       >
         <div className="auth-logo">
-          <div className="e">🏙️</div>
+          <img className="auth-logo-img" src="/imgs/logo.png" alt="My Suncity Vistaar" />
           <h1>Complete your profile</h1>
           <p>A few required details to finish{prefillEmail ? ` for ${prefillEmail}` : ''}</p>
         </div>
@@ -144,21 +144,12 @@ export default function OAuthCallback() {
               required
             />
           </Field>
-          <Field label="FLAT / HOUSE NO.">
-            <input className="input" value={form.flat_no} onChange={set('flat_no')} placeholder="e.g. A-101" required />
-          </Field>
-          <Field label="BLOCK">
-            <select className="input" value={form.block} onChange={set('block')} required>
-              <option value="" disabled>
-                Select your block
-              </option>
-              {BLOCKS.map((b) => (
-                <option key={b} value={b}>
-                  {b}
-                </option>
-              ))}
-            </select>
-          </Field>
+          <BlockHousePicker
+            block={form.block}
+            houseNo={form.house_no}
+            onBlockChange={(v) => setForm((f) => ({ ...f, block: v }))}
+            onHouseNoChange={(v) => setForm((f) => ({ ...f, house_no: v }))}
+          />
           <Btn block disabled={busy} type="submit">
             {busy ? 'Creating account…' : 'Finish & Continue'}
           </Btn>

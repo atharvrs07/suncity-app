@@ -1,6 +1,9 @@
+import { useState } from 'react';
+import { AnimatePresence } from 'framer-motion';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './auth';
 import Layout from './components/Layout';
+import SplashScreen from './components/SplashScreen';
 import { Spinner } from './components/Glass';
 import Login from './pages/Login';
 import OBLogin from './pages/OBLogin';
@@ -33,10 +36,25 @@ function RoleRoute({ roles, children }) {
   return children;
 }
 
+// Shows the 5-second loading screen over the app on first load, then fades it
+// out. The app mounts underneath immediately so it's ready when the splash ends.
+function SplashGate({ children }) {
+  const [showSplash, setShowSplash] = useState(true);
+  return (
+    <>
+      <AnimatePresence>
+        {showSplash && <SplashScreen key="splash" onDone={() => setShowSplash(false)} />}
+      </AnimatePresence>
+      {children}
+    </>
+  );
+}
+
 export default function App() {
   return (
-    <AuthProvider>
-      <BrowserRouter>
+    <SplashGate>
+      <AuthProvider>
+        <BrowserRouter>
         <Routes>
           <Route path="/login" element={<Login />} />
           <Route path="/ob/login" element={<OBLogin />} />
@@ -84,9 +102,10 @@ export default function App() {
             <Route path="/gallery" element={<Gallery />} />
             <Route path="/settings" element={<Settings />} />
             <Route path="*" element={<Navigate to="/" replace />} />
-          </Route>
-        </Routes>
-      </BrowserRouter>
-    </AuthProvider>
+            </Route>
+          </Routes>
+        </BrowserRouter>
+      </AuthProvider>
+    </SplashGate>
   );
 }

@@ -1,20 +1,34 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { motion } from 'framer-motion';
+import { motion, AnimatePresence } from 'framer-motion';
 import { api } from '../api';
 import { useAuth } from '../auth';
 import { Btn, Field, PasswordInput } from '../components/Glass';
+import BlockHousePicker from '../components/BlockHousePicker';
 import OAuthButtons from '../components/OAuthButtons';
-import { BLOCKS } from '../constants';
 
 const RESEND_COOLDOWN = 60; // seconds — mirrors the server-side resend gate
+
+// Wraps a progressively-revealed step so it slides/fades in smoothly.
+function Reveal({ children }) {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: -8 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: -8 }}
+      transition={{ duration: 0.28, ease: 'easeOut' }}
+    >
+      {children}
+    </motion.div>
+  );
+}
 
 export default function Signup() {
   const { completeSignup } = useAuth();
   const navigate = useNavigate();
 
   const [step, setStep] = useState('form'); // 'form' → 'otp'
-  const [form, setForm] = useState({ name: '', phone: '', email: '', flat_no: '', block: '', password: '' });
+  const [form, setForm] = useState({ name: '', phone: '', email: '', block: '', house_no: '', password: '' });
   const [otp, setOtp] = useState('');
   const [error, setError] = useState('');
   const [info, setInfo] = useState('');
@@ -22,6 +36,10 @@ export default function Signup() {
   const [cooldown, setCooldown] = useState(0);
 
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+
+  // Progressive reveal: Name → Block + House No. → email/phone/password.
+  const showLocation = form.name.trim().length > 0;
+  const showRest = showLocation && !!form.block && !!form.house_no;
 
   // Tick down the resend cooldown once per second.
   useEffect(() => {
@@ -167,62 +185,68 @@ export default function Signup() {
         transition={{ type: 'spring', damping: 24, stiffness: 260 }}
       >
         <div className="auth-logo">
-          <div className="e">🏙️</div>
+          <img className="auth-logo-img" src="/imgs/logo.png" alt="My Suncity Vistaar" />
           <h1>Create Account</h1>
           <p>Join My Suncity Vistaar</p>
         </div>
         {error && <div className="err-banner">{error}</div>}
         <form onSubmit={submitForm}>
           <Field label="FULL NAME">
-            <input className="input" value={form.name} onChange={set('name')} placeholder="Your name" required />
+            <input className="input" value={form.name} onChange={set('name')} placeholder="Your name" required autoFocus />
           </Field>
-          <Field label="PHONE NUMBER">
-            <input
-              className="input"
-              type="tel"
-              inputMode="numeric"
-              value={form.phone}
-              onChange={set('phone')}
-              placeholder="10-digit mobile number"
-              required
-            />
-          </Field>
-          <Field label="EMAIL">
-            <input
-              className="input"
-              type="email"
-              value={form.email}
-              onChange={set('email')}
-              placeholder="you@example.com"
-              required
-            />
-          </Field>
-          <Field label="FLAT / HOUSE NO.">
-            <input className="input" value={form.flat_no} onChange={set('flat_no')} placeholder="e.g. A-101" required />
-          </Field>
-          <Field label="BLOCK">
-            <select className="input" value={form.block} onChange={set('block')} required>
-              <option value="" disabled>
-                Select your block
-              </option>
-              {BLOCKS.map((b) => (
-                <option key={b} value={b}>
-                  {b}
-                </option>
-              ))}
-            </select>
-          </Field>
-          <Field label="PASSWORD">
-            <PasswordInput
-              value={form.password}
-              onChange={set('password')}
-              placeholder="At least 6 characters"
-              required
-            />
-          </Field>
-          <Btn block disabled={busy} type="submit">
-            {busy ? 'Sending code…' : 'Sign Up'}
-          </Btn>
+
+          <AnimatePresence>
+            {showLocation && (
+              <Reveal key="location">
+                <BlockHousePicker
+                  block={form.block}
+                  houseNo={form.house_no}
+                  onBlockChange={(v) => setForm((f) => ({ ...f, block: v }))}
+                  onHouseNoChange={(v) => setForm((f) => ({ ...f, house_no: v }))}
+                />
+              </Reveal>
+            )}
+          </AnimatePresence>
+
+          <AnimatePresence>
+            {showRest && (
+              <Reveal key="rest">
+                <Field label="EMAIL">
+                  <input
+                    className="input"
+                    type="email"
+                    value={form.email}
+                    onChange={set('email')}
+                    placeholder="you@example.com"
+                    required
+                  />
+                </Field>
+                <Field label="PHONE NUMBER">
+                  <input
+                    className="input"
+                    type="tel"
+                    inputMode="numeric"
+                    value={form.phone}
+                    onChange={set('phone')}
+                    placeholder="10-digit mobile number"
+                    required
+                  />
+                </Field>
+                <Field label="PASSWORD">
+                  <PasswordInput
+                    value={form.password}
+                    onChange={set('password')}
+                    placeholder="At least 6 characters"
+                    minLength={6}
+                    required
+                  />
+                </Field>
+                <Btn block disabled={busy} type="submit">
+                  {busy ? 'Sending code…' : 'Sign Up'}
+                </Btn>
+              </Reveal>
+            )}
+          </AnimatePresence>
         </form>
         <OAuthButtons label="or sign up with" />
         <p className="muted" style={{ textAlign: 'center', marginTop: 16 }}>

@@ -8,12 +8,15 @@
     "start": "node server/index.js",
     "dev": "node server/index.js",
     "dev:client": "npm --prefix client run dev",
-    "build": "npm --prefix client install && npm --prefix client run build"
+    "build": "npm --prefix client install && npm --prefix client run build",
+    "seed:office-bearers": "node server/seed-office-bearers.js",
+    "reset-data": "node server/reset-data.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
     "better-sqlite3": "^12.2.0",
     "cors": "^2.8.5",
+    "disposable-email-domains": "^1.0.62",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "jsonwebtoken": "^9.0.2",

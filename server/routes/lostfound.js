@@ -20,7 +20,8 @@ router.get('/', (req, res) => {
 router.post('/', upload.single('photo'), (req, res) => {
   const { type, title, description, location, contact_phone } = req.body || {};
   if (!['lost', 'found'].includes(type)) return res.status(400).json({ error: 'Choose Lost or Found' });
-  if (!title || !title.trim()) return res.status(400).json({ error: 'Title is required' });
+  if (!title || !title.trim()) return res.status(400).json({ error: 'Item name is required' });
+  if (!description || !String(description).trim()) return res.status(400).json({ error: 'Description is required' });
   const photo = req.file ? `/uploads/${req.file.filename}` : null;
   const info = db
     .prepare(

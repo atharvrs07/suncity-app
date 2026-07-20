@@ -2,8 +2,9 @@ import { useState } from 'react';
 import { api, fmtMoney } from '../api';
 import { useFetch } from '../hooks';
 import { useAuth } from '../auth';
-import { GlassCard, Btn, Chip, Field, Toggle, Sheet, Segmented, Empty, Spinner, StaggerList, StaggerItem } from '../components/Glass';
+import { GlassCard, Btn, Chip, Field, Toggle, Sheet, Segmented, Empty, Spinner, StaggerList, StaggerItem, PasswordInput } from '../components/Glass';
 import { roleLabel, BLOCKS } from '../constants';
+import BlockHousePicker from '../components/BlockHousePicker';
 
 const TABS = [
   { value: 'automations', label: 'Automated Dues' },
@@ -209,12 +210,18 @@ function AutomationsTab() {
   );
 }
 
+const emptyEdit = { name: '', phone: '', email: '', block: '', house_no: '', password: '' };
+
 function UsersTab() {
   const { user: me } = useAuth();
   const { data, loading, reload } = useFetch('/api/users');
   const [resetResult, setResetResult] = useState(null); // { user, password }
   const [copied, setCopied] = useState(false);
   const [blockFilter, setBlockFilter] = useState('all');
+  const [editing, setEditing] = useState(null); // the user being edited, or null
+  const [form, setForm] = useState(emptyEdit);
+  const [editErr, setEditErr] = useState('');
+  const [savingEdit, setSavingEdit] = useState(false);
 
   async function setStatus(u, status) {
     const verb = status === 'approved' ? 'Enable' : 'Disable';
@@ -245,6 +252,57 @@ function UsersTab() {
       setCopied(true);
     } catch {
       /* clipboard unavailable (e.g. plain http) — password stays visible to copy manually */
+    }
+  }
+
+  function openEdit(u) {
+    setForm({
+      name: u.name || '',
+      phone: u.phone || '',
+      email: u.email || '',
+      block: u.block || '',
+      house_no: u.house_no || '',
+      password: '',
+    });
+    setEditErr('');
+    setEditing(u);
+  }
+
+  async function saveEdit(e) {
+    e.preventDefault();
+    setSavingEdit(true);
+    setEditErr('');
+    // Send only what changed (and the password only if a new one was typed) so
+    // untouched, format-sensitive fields aren't needlessly re-validated.
+    const body = {};
+    for (const k of ['name', 'phone', 'email', 'block', 'house_no']) {
+      if ((form[k] || '') !== (editing[k] || '')) body[k] = form[k];
+    }
+    if (form.password) body.password = form.password;
+    if (Object.keys(body).length === 0) {
+      setEditing(null);
+      setSavingEdit(false);
+      return;
+    }
+    try {
+      await api(`/api/users/${editing.id}`, { method: 'PATCH', body });
+      setEditing(null);
+      reload();
+    } catch (err) {
+      setEditErr(err.message);
+    } finally {
+      setSavingEdit(false);
+    }
+  }
+
+  async function deleteUser(u) {
+    if (!confirm(`Permanently delete ${u.name}'s account? This also removes their complaints, dues and Lost & Found posts. This cannot be undone.`)) return;
+    try {
+      await api(`/api/users/${u.id}`, { method: 'DELETE' });
+      setEditing(null);
+      reload();
+    } catch (err) {
+      alert(err.message);
     }
   }
 
@@ -309,6 +367,9 @@ function UsersTab() {
                       Disable
                     </Btn>
                   )}
+                  <Btn variant="ghost" sm onClick={() => openEdit(u)}>
+                    ✏️ Edit
+                  </Btn>
                   <Btn variant="ghost" sm onClick={() => resetPassword(u)}>
                     🔑 Reset Password
                   </Btn>
@@ -317,6 +378,75 @@ function UsersTab() {
             </StaggerItem>
           ))}
       </StaggerList>
+
+      <Sheet open={!!editing} onClose={() => setEditing(null)} title={editing ? `Edit ${editing.name}` : ''}>
+        {editing && (
+          <>
+            {editErr && <div className="err-banner">{editErr}</div>}
+            <form onSubmit={saveEdit}>
+              <Field label="NAME">
+                <input
+                  className="input"
+                  value={form.name}
+                  onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
+                  required
+                />
+              </Field>
+              {/* Office bearers sign in by username, so phone is optional for them. */}
+              <Field label={editing.username ? 'PHONE NUMBER (OPTIONAL)' : 'PHONE NUMBER'}>
+                <input
+                  className="input"
+                  type="tel"
+                  inputMode="numeric"
+                  value={form.phone}
+                  onChange={(e) => setForm((f) => ({ ...f, phone: e.target.value }))}
+                  placeholder="10-digit mobile number"
+                />
+              </Field>
+              <Field label="EMAIL (OPTIONAL)">
+                <input
+                  className="input"
+                  type="email"
+                  value={form.email}
+                  onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))}
+                  placeholder="you@example.com"
+                />
+              </Field>
+              {/* Block/house apply to residents; other roles have no society flat. */}
+              {editing.role === 'resident' && (
+                <BlockHousePicker
+                  block={form.block}
+                  houseNo={form.house_no}
+                  onBlockChange={(v) => setForm((f) => ({ ...f, block: v }))}
+                  onHouseNoChange={(v) => setForm((f) => ({ ...f, house_no: v }))}
+                />
+              )}
+              <Field label="SET NEW PASSWORD (OPTIONAL)">
+                <PasswordInput
+                  value={form.password}
+                  onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))}
+                  placeholder="Leave blank to keep current password"
+                />
+              </Field>
+              <Btn block disabled={savingEdit} type="submit">
+                {savingEdit ? 'Saving…' : 'Save Changes'}
+              </Btn>
+            </form>
+
+            {editing.role === 'resident' && editing.id !== me.id && (
+              <div style={{ marginTop: 18, paddingTop: 14, borderTop: '1px solid rgba(255,255,255,0.12)' }}>
+                <p className="tiny" style={{ marginBottom: 8 }}>
+                  Deleting removes the account and all of its complaints, dues and Lost &amp; Found posts. This
+                  can't be undone.
+                </p>
+                <Btn block variant="danger" onClick={() => deleteUser(editing)}>
+                  Delete this account
+                </Btn>
+              </div>
+            )}
+          </>
+        )}
+      </Sheet>
 
       <Sheet
         open={!!resetResult}

@@ -128,6 +128,33 @@ export default function LostFound() {
       <Sheet open={showNew} onClose={() => setShowNew(false)} title="Post Lost / Found Item">
         {error && <div className="err-banner">{error}</div>}
         <form onSubmit={submit}>
+          {/* Submission flow: photo (optional) → item name → description. */}
+          <Field label="PHOTO (OPTIONAL)">
+            <input
+              className="input"
+              type="file"
+              accept="image/*"
+              onChange={(e) => setForm((f) => ({ ...f, photo: e.target.files[0] || null }))}
+            />
+          </Field>
+          <Field label="NAME OF THE ITEM">
+            <input
+              className="input"
+              value={form.title}
+              onChange={(e) => setForm((f) => ({ ...f, title: e.target.value }))}
+              placeholder="e.g. Black wallet, house keys"
+              required
+            />
+          </Field>
+          <Field label="DESCRIPTION">
+            <textarea
+              className="textarea"
+              value={form.description}
+              onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
+              placeholder="What does it look like, and what is it?"
+              required
+            />
+          </Field>
           <div style={{ marginBottom: 13 }}>
             <Segmented
               options={[
@@ -138,22 +165,6 @@ export default function LostFound() {
               onChange={(v) => setForm((f) => ({ ...f, type: v }))}
             />
           </div>
-          <Field label="WHAT IS IT?">
-            <input
-              className="input"
-              value={form.title}
-              onChange={(e) => setForm((f) => ({ ...f, title: e.target.value }))}
-              placeholder="e.g. Black wallet, house keys"
-              required
-            />
-          </Field>
-          <Field label="DETAILS (OPTIONAL)">
-            <textarea
-              className="textarea"
-              value={form.description}
-              onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
-            />
-          </Field>
           <Field label="LOCATION (OPTIONAL)">
             <input
               className="input"
@@ -169,14 +180,6 @@ export default function LostFound() {
               value={form.contact_phone}
               onChange={(e) => setForm((f) => ({ ...f, contact_phone: e.target.value }))}
               placeholder="Leave blank to use your number"
-            />
-          </Field>
-          <Field label="PHOTO (OPTIONAL)">
-            <input
-              className="input"
-              type="file"
-              accept="image/*"
-              onChange={(e) => setForm((f) => ({ ...f, photo: e.target.files[0] || null }))}
             />
           </Field>
           <Btn block disabled={busy} type="submit">

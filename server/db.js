@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS users (
   password_hash TEXT NOT NULL,
   flat_no TEXT,
   block TEXT,
+  house_no TEXT,
   role TEXT NOT NULL CHECK (role IN ('admin','office_bearer','supervisor','resident')),
   role_detail TEXT,
   status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected')),
@@ -160,6 +161,7 @@ CREATE TABLE IF NOT EXISTS signup_otps (
   phone TEXT NOT NULL,
   flat_no TEXT,
   block TEXT,
+  house_no TEXT,
   password_hash TEXT NOT NULL,
   code_hash TEXT NOT NULL,
   expires_at TEXT NOT NULL,
@@ -251,6 +253,23 @@ function migrateBlockAndOAuth() {
   }
 }
 migrateBlockAndOAuth();
+
+// Migration for DBs created before the dependent House No. dropdown existed.
+// house_no is a plain nullable column on both the users table and the pending
+// signup table, so guarded ADD COLUMNs suffice.
+function migrateHouseNo() {
+  const userCols = db.prepare('PRAGMA table_info(users)').all().map((c) => c.name);
+  if (!userCols.includes('house_no')) {
+    console.log('[migrate] Adding users.house_no column…');
+    db.exec('ALTER TABLE users ADD COLUMN house_no TEXT');
+  }
+  const otpCols = db.prepare('PRAGMA table_info(signup_otps)').all().map((c) => c.name);
+  if (!otpCols.includes('house_no')) {
+    console.log('[migrate] Adding signup_otps.house_no column…');
+    db.exec('ALTER TABLE signup_otps ADD COLUMN house_no TEXT');
+  }
+}
+migrateHouseNo();
 
 // The approval chain must never get stuck with zero admins: whenever no
 // approved admin exists, create (or promote) the fallback admin from env.
