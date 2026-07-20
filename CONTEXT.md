@@ -83,11 +83,16 @@ RBAC middleware applies unchanged. Phone login for admin/resident/supervisor is 
 - Schema: `users.phone` is now nullable, `users.username` added (both UNIQUE, nullable).
   Migration for pre-existing DBs is a users-table rebuild in `db.js` (`migrateUsersUsername`),
   idempotent, verified with `PRAGMA foreign_key_check`.
-- Seed: `node server/seed-office-bearers.js` — one-time seed of the 12 title accounts
-  (usernames are lowercase slugs: `chairman`, `vice-chairman-1`, … `member-6`), each with a
-  distinct random 12-char password, bcrypt-hashed, status `approved`. Credentials are printed
-  once and appended to `office-bearer-credentials.txt` (git-ignored). Re-running skips
-  existing usernames.
+- Seed: the 12 title accounts (usernames are lowercase slugs: `chairman`, `vice-chairman-1`,
+  … `member-6`), each with a distinct random 12-char password, bcrypt-hashed, status
+  `approved`. **Now auto-seeded at boot** (`server/lib/officeBearers.js`, called from
+  `index.js`) so a fresh DB — e.g. the first start on a newly-persistent DATA_DIR, on a host
+  with no shell — always has them; idempotent (skips existing usernames, so it only fills the
+  gaps and never touches changed passwords). New credentials are appended to
+  `office-bearer-credentials.txt` **inside DATA_DIR** (persistent, retrievable via the host's
+  File Manager) and printed to the boot logs. `node server/seed-office-bearers.js`
+  (`npm run seed:office-bearers`) still runs the same seeding on demand. Admins can also reset
+  any office bearer's password from Admin → Users.
 - Security: single generic "Invalid username or password" for every failure (no username
   enumeration), dummy bcrypt compare for unknown usernames (timing), in-memory rate limit
   (10 attempts / 15 min / IP → 429; resets on server restart).
