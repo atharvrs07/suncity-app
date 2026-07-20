@@ -4,6 +4,7 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './auth';
 import Layout from './components/Layout';
 import SplashScreen from './components/SplashScreen';
+import Watermark from './components/Watermark';
 import { Spinner } from './components/Glass';
 import Login from './pages/Login';
 import OBLogin from './pages/OBLogin';
@@ -32,6 +33,8 @@ function Protected({ children }) {
 
 function RoleRoute({ roles, children }) {
   const { user } = useAuth();
+  // The super admin can reach every route unconditionally.
+  if (user.role === 'super_admin') return children;
   if (!roles.includes(user.role)) return <Navigate to="/" replace />;
   return children;
 }
@@ -54,6 +57,7 @@ export default function App() {
   return (
     <SplashGate>
       <AuthProvider>
+        <Watermark />
         <BrowserRouter>
         <Routes>
           <Route path="/login" element={<Login />} />

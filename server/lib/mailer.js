@@ -106,4 +106,41 @@ function sendNewResidentAdminEmail({ to, adminName, resident }) {
   return sendMail({ to, subject, text, html });
 }
 
-module.exports = { sendMail, sendPasswordResetEmail, sendSignupOtpEmail, sendNewResidentAdminEmail };
+function sendPendingAccountAdminEmail({ to, adminName, pending }) {
+  const roleLabel = pending.role === 'admin' ? 'Admin' : `Office Bearer — ${pending.role_detail}`;
+  const subject = 'Account awaiting approval — My Suncity Vistaar';
+  const contact = [pending.phone ? `Phone: ${pending.phone}` : '', pending.email ? `Email: ${pending.email}` : '']
+    .filter(Boolean)
+    .join('\n');
+  const text =
+    `Hi ${adminName || 'Admin'},\n\n` +
+    `A new higher-authority account is waiting for your approval.\n\n` +
+    `Name: ${pending.name}\n` +
+    `Requested role: ${roleLabel}\n` +
+    `${contact}\n\n` +
+    `Open the Approvals screen to review it. For office bearers you can also choose their permissions when approving.\n\n` +
+    `— My Suncity Vistaar`;
+  const html = `
+  <div style="font-family:Arial,Helvetica,sans-serif;max-width:520px;margin:0 auto;padding:24px;color:#232634;">
+    <h2 style="margin:0 0 4px;">🏙️ My Suncity Vistaar</h2>
+    <p style="margin:0 0 20px;color:#5d6175;font-size:13px;">Sun City Vistaar society</p>
+    <p>Hi ${adminName || 'Admin'},</p>
+    <p>A new higher-authority account is waiting for your approval.</p>
+    <table style="border-collapse:collapse;font-size:14px;margin:14px 0;">
+      <tr><td style="padding:4px 12px 4px 0;color:#5d6175;">Name</td><td style="padding:4px 0;font-weight:600;">${pending.name}</td></tr>
+      <tr><td style="padding:4px 12px 4px 0;color:#5d6175;">Role</td><td style="padding:4px 0;font-weight:600;">${roleLabel}</td></tr>
+      ${pending.phone ? `<tr><td style="padding:4px 12px 4px 0;color:#5d6175;">Phone</td><td style="padding:4px 0;font-weight:600;">${pending.phone}</td></tr>` : ''}
+      ${pending.email ? `<tr><td style="padding:4px 12px 4px 0;color:#5d6175;">Email</td><td style="padding:4px 0;font-weight:600;">${pending.email}</td></tr>` : ''}
+    </table>
+    <p style="color:#5d6175;font-size:13px;">Open the Approvals screen to review it. For office bearers you can also choose their permissions when approving.</p>
+  </div>`;
+  return sendMail({ to, subject, text, html });
+}
+
+module.exports = {
+  sendMail,
+  sendPasswordResetEmail,
+  sendSignupOtpEmail,
+  sendNewResidentAdminEmail,
+  sendPendingAccountAdminEmail,
+};

@@ -6,7 +6,13 @@ const db = require('../db');
 const cfg = require('../config');
 const oauth = require('../lib/oauth');
 const { sign, authRequired } = require('../middleware/auth');
-const { sendPasswordResetEmail, sendSignupOtpEmail, sendNewResidentAdminEmail } = require('../lib/mailer');
+const { logAudit } = require('../lib/audit');
+const {
+  sendPasswordResetEmail,
+  sendSignupOtpEmail,
+  sendNewResidentAdminEmail,
+  sendPendingAccountAdminEmail,
+} = require('../lib/mailer');
 const { isValidHouseNo } = require('../lib/houseNumbers');
 const { isDisposableEmail, hasMxRecords } = require('../lib/emailValidation');
 
@@ -240,6 +246,7 @@ router.post('/verify-signup', (req, res) => {
     return res.status(err.status || 500).json({ error: err.message || 'Could not create your account' });
   }
 
+  logAudit({ actor: user, action: 'resident_signup', targetType: 'user', targetId: user.id, detail: `${user.name} joined` });
   notifyAdminsNewResident(user).catch((err) => console.error('[notify] admin notification failed:', err.message));
 
   res.status(201).json({ token: sign(user), user });
@@ -274,6 +281,86 @@ router.post('/resend-otp', (req, res) => {
   }
   // Generic response either way so a completed/absent signup can't be probed.
   res.json({ message: 'If a signup is in progress for that email, a new code has been sent.' });
+});
+
+// ---- Higher-authority signup (office bearer / admin) ----
+// Unlike residents, these roles carry real authority, so they are NOT
+// email-OTP-verified and NOT auto-approved: the account is created 'pending' and
+// an admin must approve it (choosing the office bearer's permissions at that
+// point). Login is by phone once approved. Super admin is never creatable here.
+const STAFF_ROLES = ['office_bearer', 'admin'];
+const staffSignupLimiter = makeRateLimiter(10, 15 * 60 * 1000);
+
+function notifyAdminsPendingAccount(pending) {
+  const admins = db
+    .prepare(
+      "SELECT name, email FROM users WHERE role IN ('admin','super_admin') AND status = 'approved' AND email IS NOT NULL AND email != ''"
+    )
+    .all();
+  if (admins.length === 0) {
+    console.log(`[notify] Pending ${pending.role} ${pending.name} needs approval — no admin email on file.`);
+    return Promise.resolve();
+  }
+  return Promise.all(
+    admins.map((a) =>
+      sendPendingAccountAdminEmail({ to: a.email, adminName: a.name, pending }).catch((err) =>
+        console.error('[mail] Failed to notify admin of pending account:', err.message)
+      )
+    )
+  );
+}
+
+router.post('/signup-staff', (req, res) => {
+  if (staffSignupLimiter.limited(req.ip)) {
+    return res.status(429).json({ error: 'Too many attempts. Try again in a few minutes.' });
+  }
+  const { name, role, role_detail, email, phone, password } = req.body || {};
+  const cleanName = String(name || '').trim();
+  const wantRole = STAFF_ROLES.includes(role) ? role : null;
+  const cleanPhone = normalizePhone(phone);
+  const cleanEmail = normalizeEmail(email);
+
+  if (!cleanName) return res.status(400).json({ error: 'Name is required' });
+  if (!wantRole) return res.status(400).json({ error: 'Choose a valid account type' });
+
+  let cleanDetail = null;
+  if (wantRole === 'office_bearer') {
+    cleanDetail = String(role_detail || '').trim();
+    if (!cfg.OFFICE_BEARER_ROLES.includes(cleanDetail)) {
+      return res.status(400).json({ error: 'Choose your committee post' });
+    }
+  }
+  if (cleanPhone.length !== 10) return res.status(400).json({ error: 'Enter a valid 10-digit phone number' });
+  if (cleanEmail && !EMAIL_RE.test(cleanEmail)) return res.status(400).json({ error: 'Enter a valid email address' });
+  if (!password || password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
+
+  if (db.prepare('SELECT id FROM users WHERE phone = ?').get(cleanPhone)) {
+    return res.status(409).json({ error: 'An account with this phone number already exists' });
+  }
+  if (cleanEmail && db.prepare('SELECT id FROM users WHERE email = ?').get(cleanEmail)) {
+    return res.status(409).json({ error: 'An account with this email already exists' });
+  }
+
+  const info = db
+    .prepare(
+      "INSERT INTO users (name, phone, email, password_hash, role, role_detail, status) VALUES (?, ?, ?, ?, ?, ?, 'pending')"
+    )
+    .run(cleanName, cleanPhone, cleanEmail, bcrypt.hashSync(password, 10), wantRole, cleanDetail);
+
+  const created = { id: info.lastInsertRowid, name: cleanName, role: wantRole, role_detail: cleanDetail, phone: cleanPhone, email: cleanEmail };
+  logAudit({
+    actor: null,
+    action: 'staff_signup_request',
+    targetType: 'user',
+    targetId: created.id,
+    detail: `${cleanName} requested ${wantRole === 'admin' ? 'Admin' : `Office Bearer — ${cleanDetail}`}`,
+  });
+  notifyAdminsPendingAccount(created).catch((err) => console.error('[notify] pending-account notification failed:', err.message));
+
+  res.status(201).json({
+    message:
+      "Your account request has been submitted. An admin will review it, and you'll be able to sign in once it's approved.",
+  });
 });
 
 // ---- OAuth sign-in (Google, Apple, Microsoft) ----
@@ -457,6 +544,7 @@ router.post('/login', (req, res) => {
   if (user.status === 'rejected') {
     return res.status(403).json({ error: 'Your signup was rejected. Contact the society office.' });
   }
+  logAudit({ actor: user, action: 'login', detail: 'phone login' });
   const { password_hash, ...safe } = user;
   res.json({ token: sign(user), user: safe });
 });
@@ -475,14 +563,17 @@ router.post('/ob-login', (req, res) => {
   }
   const { username, password } = req.body || {};
   const uname = String(username || '').trim().toLowerCase();
+  // The hidden committee login serves username-based office-bearer and admin
+  // accounts (super admin uses phone login).
   const user = uname
-    ? db.prepare("SELECT * FROM users WHERE username = ? AND role = 'office_bearer'").get(uname)
+    ? db.prepare("SELECT * FROM users WHERE username = ? AND role IN ('office_bearer','admin')").get(uname)
     : null;
   const ok = bcrypt.compareSync(password || '', user ? user.password_hash : DUMMY_HASH);
   if (!user || !ok || user.status !== 'approved') {
     return res.status(401).json({ error: 'Invalid username or password' });
   }
   obLimiter.clear(req.ip);
+  logAudit({ actor: user, action: 'login', detail: 'committee (username) login' });
   const { password_hash, ...safe } = user;
   res.json({ token: sign(user), user: safe });
 });
@@ -565,6 +656,7 @@ router.post('/reset-password', (req, res) => {
     db.prepare("UPDATE password_reset_tokens SET used_at = datetime('now') WHERE id = ?").run(row.id);
     db.prepare('DELETE FROM password_reset_tokens WHERE user_id = ? AND used_at IS NULL').run(row.user_id);
   })();
+  logAudit({ actor: { id: row.user_id }, action: 'password_reset', targetType: 'user', targetId: row.user_id, detail: 'via reset link' });
   res.json({ message: 'Password updated. You can now sign in with your new password.' });
 });
 
@@ -578,6 +670,7 @@ router.post('/change-password', authRequired, (req, res) => {
     return res.status(401).json({ error: 'Current password is incorrect' });
   }
   db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(bcrypt.hashSync(new_password, 10), req.user.id);
+  logAudit({ actor: req.user, action: 'password_change', detail: 'self-service' });
   res.json({ message: 'Password updated' });
 });
 

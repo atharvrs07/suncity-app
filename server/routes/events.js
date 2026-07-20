@@ -1,6 +1,7 @@
 const express = require('express');
 const db = require('../db');
-const { authRequired, requireRoles } = require('../middleware/auth');
+const { authRequired, requirePermission, isAdmin } = require('../middleware/auth');
+const { logAudit } = require('../lib/audit');
 const upload = require('../lib/uploads');
 
 const router = express.Router();
@@ -13,10 +14,10 @@ router.get('/', (req, res) => {
        ORDER BY COALESCE(e.event_date, e.created_at) DESC`
     )
     .all();
-  res.json({ events, can_post: ['admin', 'office_bearer'].includes(req.user.role) });
+  res.json({ events, can_post: isAdmin(req.user) || (req.user.role === 'office_bearer' && req.user.permissions.includes('manage_events')) });
 });
 
-router.post('/', requireRoles('admin', 'office_bearer'), upload.single('photo'), (req, res) => {
+router.post('/', requirePermission('manage_events'), upload.single('photo'), (req, res) => {
   const { heading, details, event_date } = req.body || {};
   if (!heading || !heading.trim()) return res.status(400).json({ error: 'Event heading is required' });
   if (event_date && !/^\d{4}-\d{2}-\d{2}$/.test(event_date)) return res.status(400).json({ error: 'Invalid event date' });
@@ -24,16 +25,18 @@ router.post('/', requireRoles('admin', 'office_bearer'), upload.single('photo'),
   const info = db
     .prepare('INSERT INTO events (heading, details, photo, event_date, posted_by) VALUES (?, ?, ?, ?, ?)')
     .run(heading.trim(), details ? String(details).trim() : null, photo, event_date || null, req.user.id);
+  logAudit({ actor: req.user, action: 'event_post', targetType: 'event', targetId: info.lastInsertRowid, detail: heading.trim() });
   res.status(201).json({ id: info.lastInsertRowid, message: 'Event posted' });
 });
 
-router.delete('/:id', requireRoles('admin', 'office_bearer'), (req, res) => {
+router.delete('/:id', requirePermission('manage_events'), (req, res) => {
   const event = db.prepare('SELECT * FROM events WHERE id = ?').get(req.params.id);
   if (!event) return res.status(404).json({ error: 'Event not found' });
-  if (req.user.role !== 'admin' && event.posted_by !== req.user.id) {
+  if (!isAdmin(req.user) && event.posted_by !== req.user.id) {
     return res.status(403).json({ error: 'You can only delete your own events' });
   }
   db.prepare('DELETE FROM events WHERE id = ?').run(event.id);
+  logAudit({ actor: req.user, action: 'event_delete', targetType: 'event', targetId: event.id, detail: event.heading });
   res.json({ message: 'Event deleted' });
 });
 

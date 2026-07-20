@@ -3,7 +3,7 @@
 Residential society management web app. Node.js/Express/SQLite backend + React/Vite frontend,
 JWT auth (phone + password), mobile-first responsive web (no native app).
 
-## Build status (updated 2026-07-19)
+## Build status (updated 2026-07-21)
 
 All four phases from the spec are **built and smoke-tested**:
 
@@ -85,14 +85,12 @@ RBAC middleware applies unchanged. Phone login for admin/resident/supervisor is 
   idempotent, verified with `PRAGMA foreign_key_check`.
 - Seed: the 12 title accounts (usernames are lowercase slugs: `chairman`, `vice-chairman-1`,
   … `member-6`), each with a distinct random 12-char password, bcrypt-hashed, status
-  `approved`. **Now auto-seeded at boot** (`server/lib/officeBearers.js`, called from
-  `index.js`) so a fresh DB — e.g. the first start on a newly-persistent DATA_DIR, on a host
-  with no shell — always has them; idempotent (skips existing usernames, so it only fills the
-  gaps and never touches changed passwords). New credentials are appended to
-  `office-bearer-credentials.txt` **inside DATA_DIR** (persistent, retrievable via the host's
-  File Manager) and printed to the boot logs. `node server/seed-office-bearers.js`
-  (`npm run seed:office-bearers`) still runs the same seeding on demand. Admins can also reset
-  any office bearer's password from Admin → Users.
+  `approved`. **NOTE (superseded 2026-07-21):** office bearers are no longer auto-seeded — they
+  now sign up (account-type dropdown) and are approved by an admin who assigns their permissions
+  (see the "Super admin…" section below). `/ob/login` stays for any username-based office-bearer/
+  admin accounts. `server/lib/officeBearers.js` + `node server/seed-office-bearers.js`
+  (`npm run seed:office-bearers`) remain for optional manual use. Admins can reset any office
+  bearer's password from Admin → Users.
 - Security: single generic "Invalid username or password" for every failure (no username
   enumeration), dummy bcrypt compare for unknown usernames (timing), in-memory rate limit
   (10 attempts / 15 min / IP → 429; resets on server restart).
@@ -124,12 +122,11 @@ RBAC middleware applies unchanged. Phone login for admin/resident/supervisor is 
 
 ## Resident signup via email OTP (added 2026-07-20)
 
-Public signup at `/signup` is now **residents only** — the role/account-type dropdown is
-gone. Instead of parking accounts in `pending` for admin approval, residents verify an
-emailed OTP and are created already `approved` + logged in. Other roles are still
-provisioned outside this flow (office bearers via `seed-office-bearers.js` + hidden `/ob/login`;
-admins via the env seed / `ensureSeedAdmin`) — that path is untouched, and the Approvals
-screen + approval chain remain for it.
+Residents verify an emailed OTP and are created already `approved` + logged in (no admin
+approval). **NOTE (updated 2026-07-21):** the account-type dropdown is back on `/signup` —
+residents keep this OTP flow, while Office Bearer / Admin selections go through
+`POST /api/auth/signup-staff` (no OTP, created `pending`, admin approves with permissions). See
+the "Super admin…" section below.
 
 - **Flow**: `POST /api/auth/signup` (name, phone, email, flat_no, block, password — all now
   required; see the mandatory-fields section below) validates + checks phone/email uniqueness,
@@ -259,20 +256,75 @@ by `requireRoles('admin')`).
   directly, and it invalidates any outstanding self-service reset tokens). The client "✏️ Edit"
   button opens a Sheet that sends only changed fields; the Block/House picker shows only for
   residents.
-- **Delete a resident** — `DELETE /api/users/:id`. **Residents only** (office-bearer / admin /
-  supervisor accounts are provisioned outside signup and can't be deleted here → 400); can't
-  delete yourself → 400. Cascades in one transaction: the resident's payments + due_extensions
-  (by user_id and by their dues' ids), dues, complaints, lost & found posts, and password-reset
-  tokens, then the user row. Danger button lives at the bottom of the Edit sheet (residents only).
+- **Delete an account** — `DELETE /api/users/:id`. **NOTE (expanded 2026-07-21):** now deletes
+  ANY non-super-admin account (not just residents), never yourself, and never the last admin
+  (unless super_admin). Society-owned content the account posted (notices/events/gallery/
+  classifieds) is reassigned to the acting admin; personal records (payments + due_extensions,
+  dues, complaints, lost & found, reset tokens) cascade, then the user row. Danger button is at
+  the bottom of the Edit sheet for any non-super-admin, non-self account.
 - The existing **🔑 Reset Password** (random, shown once) is unchanged and kept alongside Edit.
 - Both actions write an `[audit]` log line naming the acting admin and target.
 
+## Super admin, office-bearer permissions, staff signup & activity log (added 2026-07-21)
+
+A new top role plus a granular permission model and a full activity log.
+
+- **`super_admin` role** — a hidden, auto-seeded, all-powerful account. Added to `ROLES` and
+  the `users.role` CHECK. Old DBs are migrated by `migrateSuperAdminAndPermissions()` in `db.js`
+  (guarded users-table rebuild — the only way SQLite can change a CHECK — which also introduces
+  the nullable `permissions` column; verified with `PRAGMA foreign_key_check`). Seeded once by
+  `ensureSuperAdmin()` from `SUPER_ADMIN_*` env (defaults: phone `7817834370`, email
+  `atharvrs2010@gmail.com`, password `sadmin123` — change via env in prod). **Idempotent: only
+  created if no super_admin exists**, so a later password change persists across deploys. It is
+  the ONLY auto-generated account. Logs in via normal phone login. **Secret:** hidden from the
+  admin Users list and shielded from every user-management route (returns 404 to non-super_admin
+  via `getManageableTarget`), and the developer watermark is suppressed for it.
+- **Office-bearer permissions** — `OFFICE_BEARER_PERMISSIONS` in `config.js` (mirrored with
+  labels in `constants.js`): `manage_notices, manage_events, manage_gallery, manage_classifieds,
+  manage_complaints, manage_dues, manage_lostfound`. Stored as a JSON array in `users.permissions`.
+  Admin/super_admin implicitly hold all. `middleware/auth.js` gained `hasPermission(user, perm)`,
+  `requirePermission(perm)`, `isAdmin(user)`, and now parses `permissions` onto `req.user`;
+  `requireRoles` lets `super_admin` through every gate. Module routes (notices/events/gallery/
+  classifieds/complaints/dues/lostfound) are now permission-gated instead of blanket
+  admin/office_bearer. (Extensions + automations stay admin-only.)
+- **Account-type dropdown at signup** — `Signup.jsx` offers **Resident / Office Bearer / Admin**.
+  Residents keep the email-OTP → auto-approved flow. Office bearers (pick a committee post) and
+  admins use `POST /api/auth/signup-staff`: **no OTP**, created `pending`, and an admin must
+  approve. On approval (`/api/approvals/:id/approve`) the admin picks the office bearer's
+  permissions via checkboxes; permissions are also editable later in Admin → Users (with role
+  demote/promote). Admins are notified of pending staff by email (`sendPendingAccountAdminEmail`).
+- **User management expanded** — `PATCH /api/users/:id` now also changes `role` (demote/promote,
+  never to/from super_admin, not your own, guarded against removing the last admin),
+  `role_detail`, and `permissions`. `DELETE /api/users/:id` now removes **any** non-super-admin
+  account (not just residents); society-owned content it posted (notices/events/gallery/
+  classifieds) is reassigned to the acting admin, personal records are cascaded.
+- **Activity log** — new `audit_log` table + `lib/audit.js` (`logAudit`) writes account/auth/
+  approval/payment/content events (actor snapshotted so entries survive deletion). Read via
+  `GET /api/audit` (admin + super_admin) and shown in a new **Admin → Activity Log** tab with
+  search. Both admins and the super admin can see every log.
+- **Office-bearer auto-seed retired** — `seedOfficeBearersAtBoot` is removed from `index.js`; the
+  12 accounts now come via signup + approval. `/ob/login` stays (now accepts `office_bearer` and
+  `admin` username accounts). `server/lib/officeBearers.js` + the seed script remain for optional
+  manual use only.
+- **Developer watermark** — `components/Watermark.jsx` renders "Developed by Adarsh Sharma | 25
+  Carat Ventures" fixed at the bottom across the whole UI (`.app-watermark` in styles.css),
+  **hidden only for the super_admin account**.
+- Verified 2026-07-21: fresh-DB boot + old-DB migration (data/FKs preserved) + 21/21 HTTP
+  integration checks (super-admin login/secrecy/shield, staff signup→approve-with-permissions,
+  permission enforcement, permission edit, delete-with-reassignment, audit log). Client build clean.
+
 ## Key invariants (enforce on any change)
 
-- **RBAC lives on the API**, not just the UI. Roles: admin, office_bearer (12 named slots),
-  supervisor (maintenance | cleaning), resident.
-  - Classifieds: admin + office_bearer ONLY (residents/supervisors get 403 and no menu item).
-  - Approvals + Admin + user management + automations + payment verification: admin only.
+- **RBAC lives on the API**, not just the UI. Roles: super_admin (hidden, all-powerful),
+  admin, office_bearer (12 named slots, each with a granted `permissions` set), supervisor
+  (maintenance | cleaning), resident. `super_admin` passes every `requireRoles` gate;
+  admin/super_admin implicitly hold every office-bearer permission.
+  - Module actions (notices, events, gallery, classifieds, complaints, dues, lost & found
+    moderation) are gated by `requirePermission(...)` — office bearers act only where granted;
+    admins/super_admin always pass. Classifieds still 403s for anyone without `manage_classifieds`.
+  - Approvals + Admin + user management + automations + extensions: admin + super_admin only.
+  - The super_admin account is secret: hidden from the Users list and unmanageable (404) by
+    anyone who isn't the super_admin.
   - Cleaning supervisor sees ONLY `park_cleaning`, `drainage_cleaning`, `road_garbage_pickup`
     complaints; maintenance supervisor sees everything EXCEPT those (see CLEANING_CATEGORIES
     in server/config.js).
@@ -290,7 +342,7 @@ by `requireRoles('admin')`).
 
 ## Nice-to-have next steps (not started)
 
-- Office-bearer permission depth refinement (spec allows refining later)
+- Audit-log pagination + date filtering (currently caps at 250 newest, text search only)
 - Complaint comments/updates thread; notice editing
 - Pagination for large lists (dues admin list currently caps at 500)
 - PWA manifest + installability polish

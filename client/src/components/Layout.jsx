@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useAuth } from '../auth';
-import { MENU, roleLabel } from '../constants';
+import { menuFor, roleLabel } from '../constants';
 import { Btn } from './Glass';
 
 export default function Layout() {
@@ -10,7 +10,7 @@ export default function Layout() {
   const [open, setOpen] = useState(false);
   const location = useLocation();
 
-  const items = MENU.filter((m) => !m.roles || m.roles.includes(user.role));
+  const items = menuFor(user);
   const current = items.find((m) => m.path === location.pathname);
 
   return (

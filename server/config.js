@@ -7,7 +7,24 @@ const DATA_DIR = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : pat
 const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
 fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 
-const ROLES = ['admin', 'office_bearer', 'supervisor', 'resident'];
+// 'super_admin' is the hidden top-level account (auto-seeded, secret, has every
+// permission). It is intentionally NOT offered anywhere in signup — see
+// ensureSuperAdmin() in db.js.
+const ROLES = ['super_admin', 'admin', 'office_bearer', 'supervisor', 'resident'];
+
+// Granular permissions an admin can grant to an office bearer at approval (and
+// edit later). admins and the super_admin implicitly have all of them. Keys are
+// stored as a JSON array in users.permissions; client/src/constants.js mirrors
+// this list with display labels — keep the two in sync.
+const OFFICE_BEARER_PERMISSIONS = [
+  'manage_notices',
+  'manage_events',
+  'manage_gallery',
+  'manage_classifieds',
+  'manage_complaints',
+  'manage_dues',
+  'manage_lostfound',
+];
 
 const OFFICE_BEARER_ROLES = [
   'Chairman',
@@ -109,7 +126,17 @@ module.exports = {
     phone: process.env.ADMIN_SEED_PHONE || '9999999999',
     password: process.env.ADMIN_SEED_PASSWORD || 'admin123',
   },
+  // The single hidden super-admin account, auto-seeded at boot. Defaults are the
+  // values the owner supplied; override any of them via env in production. Only
+  // ever created if no super_admin exists yet, so a later password change sticks.
+  SUPER_ADMIN_SEED: {
+    name: process.env.SUPER_ADMIN_NAME || 'Super Admin',
+    phone: process.env.SUPER_ADMIN_PHONE || '7817834370',
+    email: process.env.SUPER_ADMIN_EMAIL || 'atharvrs2010@gmail.com',
+    password: process.env.SUPER_ADMIN_PASSWORD || 'sadmin123',
+  },
   ROLES,
+  OFFICE_BEARER_PERMISSIONS,
   OFFICE_BEARER_ROLES,
   SUPERVISOR_ROLES,
   COMPLAINT_CATEGORIES,

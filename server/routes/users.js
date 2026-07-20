@@ -3,11 +3,33 @@ const bcrypt = require('bcryptjs');
 const db = require('../db');
 const cfg = require('../config');
 const { authRequired, requireRoles } = require('../middleware/auth');
+const { logAudit } = require('../lib/audit');
 const { genPassword } = require('../lib/passwords');
 const { isValidHouseNo } = require('../lib/houseNumbers');
 
 const router = express.Router();
 router.use(authRequired, requireRoles('admin'));
+
+// Roles an admin may assign via the UI. 'super_admin' is deliberately excluded —
+// it is the hidden, auto-seeded account and can never be granted from here.
+const ASSIGNABLE_ROLES = ['admin', 'office_bearer', 'supervisor', 'resident'];
+
+// Fetch the target account, but treat the super_admin as non-existent to anyone
+// who isn't the super_admin — that account stays secret and unmanageable from
+// this screen. Sends the 404 itself and returns null when it shields/misses.
+function getManageableTarget(req, res) {
+  const target = db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
+  if (!target || (target.role === 'super_admin' && req.user.role !== 'super_admin')) {
+    res.status(404).json({ error: 'User not found' });
+    return null;
+  }
+  return target;
+}
+
+function sanitizePermissions(list) {
+  const set = new Set(Array.isArray(list) ? list : []);
+  return JSON.stringify(cfg.OFFICE_BEARER_PERMISSIONS.filter((p) => set.has(p)));
+}
 
 // Small normalizers mirroring auth.js (kept local so this admin-only module
 // stays self-contained). Phone/email are UNIQUE, so edits re-check uniqueness.
@@ -26,40 +48,54 @@ function normalizeBlock(block) {
 }
 
 router.get('/', (req, res) => {
+  // The super_admin row is hidden from everyone except the super_admin itself.
+  const where = req.user.role === 'super_admin' ? '' : "WHERE role != 'super_admin' ";
   const users = db
-    .prepare('SELECT id, name, phone, username, email, flat_no, block, house_no, role, role_detail, status, created_at FROM users ORDER BY created_at DESC')
-    .all();
+    .prepare(
+      `SELECT id, name, phone, username, email, flat_no, block, house_no, role, role_detail, permissions, status, created_at
+       FROM users ${where}ORDER BY created_at DESC`
+    )
+    .all()
+    .map((u) => ({ ...u, permissions: u.permissions ? safeParse(u.permissions) : [] }));
   res.json({ users });
 });
+
+function safeParse(json) {
+  try {
+    const a = JSON.parse(json);
+    return Array.isArray(a) ? a : [];
+  } catch {
+    return [];
+  }
+}
 
 // Admin reset for any account (residents, office bearers, admins — self
 // included). Generates a fresh random password, returned exactly once in the
 // response for the admin to pass on; only the bcrypt hash is stored.
 router.post('/:id/reset-password', (req, res) => {
-  const target = db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
-  if (!target) return res.status(404).json({ error: 'User not found' });
+  const target = getManageableTarget(req, res);
+  if (!target) return;
   const password = genPassword(12);
   db.transaction(() => {
     db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(bcrypt.hashSync(password, 10), target.id);
     // Outstanding self-service reset links stop working once an admin resets.
     db.prepare('DELETE FROM password_reset_tokens WHERE user_id = ? AND used_at IS NULL').run(target.id);
   })();
-  console.log(
-    `[audit] Admin ${req.user.name} (#${req.user.id}) reset the password of ${target.name} (#${target.id}, ${target.role})`
-  );
+  logAudit({ actor: req.user, action: 'admin_reset_password', targetType: 'user', targetId: target.id, detail: `${target.name} (${target.role})` });
   res.json({ password, message: `New password generated for ${target.name}. Share it with them securely.` });
 });
 
-// Admin edit of any account's personal details. Every field is optional — only
-// the keys present in the body are touched — so the same endpoint serves partial
-// updates. phone/email uniqueness and block/house validity are re-checked, and
-// an optional new password can be set in the same call. Everything is validated
-// up front, then applied in one transaction so a bad field never half-updates.
+// Admin edit of any account. Every field is optional — only the keys present in
+// the body are touched. Personal details (name/phone/email/block+house), the
+// account's role (demote/promote), an office bearer's committee post + granted
+// permissions, and an optional new password can all be set in one call.
+// Everything is validated up front, then applied in one transaction so a bad
+// field never half-updates. The super admin is shielded (see getManageableTarget).
 router.patch('/:id', (req, res) => {
-  const target = db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
-  if (!target) return res.status(404).json({ error: 'User not found' });
+  const target = getManageableTarget(req, res);
+  if (!target) return;
 
-  const { name, phone, email, block, house_no, password } = req.body || {};
+  const { name, phone, email, block, house_no, password, role, role_detail, permissions } = req.body || {};
   const updates = {};
 
   if (name !== undefined) {
@@ -104,6 +140,46 @@ router.patch('/:id', (req, res) => {
     updates.flat_no = nextHouse;
   }
 
+  // Role change (demote / promote). super_admin can never be assigned here, and
+  // an account can't change its own role. Demoting the last remaining admin is
+  // blocked unless the actor is the super admin.
+  let effectiveRole = target.role;
+  if (role !== undefined && role !== target.role) {
+    if (target.id === req.user.id) return res.status(400).json({ error: 'You cannot change your own role' });
+    if (!ASSIGNABLE_ROLES.includes(role)) return res.status(400).json({ error: 'Invalid role' });
+    if (target.role === 'admin' && role !== 'admin' && req.user.role !== 'super_admin') {
+      const { c } = db.prepare("SELECT COUNT(*) AS c FROM users WHERE role='admin' AND status='approved' AND id != ?").get(target.id);
+      if (c === 0) return res.status(400).json({ error: 'Cannot demote the only remaining admin' });
+    }
+    updates.role = role;
+    effectiveRole = role;
+  }
+
+  // role_detail + permissions depend on the effective (post-edit) role.
+  if (effectiveRole === 'office_bearer') {
+    if (role_detail !== undefined || updates.role !== undefined) {
+      const detail = String(role_detail !== undefined ? role_detail : target.role_detail || '').trim();
+      if (!cfg.OFFICE_BEARER_ROLES.includes(detail)) return res.status(400).json({ error: 'Choose a valid committee post' });
+      updates.role_detail = detail;
+    }
+    if (permissions !== undefined) {
+      updates.permissions = sanitizePermissions(permissions);
+    } else if (updates.role !== undefined) {
+      updates.permissions = target.role === 'office_bearer' ? target.permissions || '[]' : '[]';
+    }
+  } else if (effectiveRole === 'supervisor') {
+    if (role_detail !== undefined || updates.role !== undefined) {
+      const detail = String(role_detail !== undefined ? role_detail : target.role_detail || '').trim();
+      if (!cfg.SUPERVISOR_ROLES.includes(detail)) return res.status(400).json({ error: 'Choose maintenance or cleaning' });
+      updates.role_detail = detail;
+    }
+    if (updates.role !== undefined) updates.permissions = null;
+  } else if (updates.role !== undefined) {
+    // Demoted/promoted to admin or resident — no committee post or permissions.
+    updates.role_detail = null;
+    updates.permissions = null;
+  }
+
   let newHash = null;
   if (password !== undefined && String(password) !== '') {
     if (String(password).length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
@@ -126,27 +202,44 @@ router.patch('/:id', (req, res) => {
     }
   })();
 
-  if (newHash) {
-    console.log(`[audit] Admin ${req.user.name} (#${req.user.id}) set a new password for ${target.name} (#${target.id})`);
-  }
+  const changed = [...Object.keys(updates), ...(newHash ? ['password'] : [])];
+  logAudit({
+    actor: req.user,
+    action: 'user_edit',
+    targetType: 'user',
+    targetId: target.id,
+    detail: `${target.name} — changed: ${changed.join(', ')}`,
+  });
   const user = db
-    .prepare('SELECT id, name, phone, username, email, flat_no, block, house_no, role, role_detail, status, created_at FROM users WHERE id = ?')
+    .prepare('SELECT id, name, phone, username, email, flat_no, block, house_no, role, role_detail, permissions, status, created_at FROM users WHERE id = ?')
     .get(target.id);
+  user.permissions = user.permissions ? safeParse(user.permissions) : [];
   res.json({ user, message: 'Account updated' });
 });
 
-// Delete a resident account and everything it owns (complaints, dues + their
-// payments/extensions, lost & found posts, reset tokens) in one transaction.
-// Restricted to residents on purpose: office-bearer/admin/supervisor accounts
-// are provisioned outside signup and must not be removable from this screen.
+// Delete any account (except the super admin, and except your own). The account
+// may be a resident, office bearer, supervisor or admin. Society-owned content
+// the account posted (notices, events, gallery photos, classifieds) is reassigned
+// to the acting admin so it survives, while the account's personal records
+// (complaints, dues + their payments/extensions, lost & found posts, reset
+// tokens) are removed. All in one transaction so foreign keys stay consistent.
 router.delete('/:id', (req, res) => {
-  const target = db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
-  if (!target) return res.status(404).json({ error: 'User not found' });
+  const target = getManageableTarget(req, res);
+  if (!target) return;
   if (target.id === req.user.id) return res.status(400).json({ error: 'You cannot delete your own account' });
-  if (target.role !== 'resident') return res.status(400).json({ error: 'Only resident accounts can be deleted here' });
+  // Never delete the last remaining admin (the super admin can override this).
+  if (target.role === 'admin' && req.user.role !== 'super_admin') {
+    const { c } = db.prepare("SELECT COUNT(*) AS c FROM users WHERE role='admin' AND status='approved' AND id != ?").get(target.id);
+    if (c === 0) return res.status(400).json({ error: 'Cannot delete the only remaining admin' });
+  }
 
   db.transaction(() => {
-    // Children of the resident's dues first (FK: payments/extensions → dues).
+    // Reassign shared/society content to the acting admin so it isn't lost.
+    db.prepare('UPDATE notices SET posted_by = ? WHERE posted_by = ?').run(req.user.id, target.id);
+    db.prepare('UPDATE events SET posted_by = ? WHERE posted_by = ?').run(req.user.id, target.id);
+    db.prepare('UPDATE gallery_photos SET uploaded_by = ? WHERE uploaded_by = ?').run(req.user.id, target.id);
+    db.prepare('UPDATE classifieds SET posted_by = ? WHERE posted_by = ?').run(req.user.id, target.id);
+    // Delete the account's own records (children of dues first: FK payments/extensions → dues).
     db.prepare('DELETE FROM payments WHERE user_id = ? OR due_id IN (SELECT id FROM dues WHERE user_id = ?)').run(target.id, target.id);
     db.prepare('DELETE FROM due_extensions WHERE user_id = ? OR due_id IN (SELECT id FROM dues WHERE user_id = ?)').run(target.id, target.id);
     db.prepare('DELETE FROM dues WHERE user_id = ?').run(target.id);
@@ -156,21 +249,22 @@ router.delete('/:id', (req, res) => {
     db.prepare('DELETE FROM users WHERE id = ?').run(target.id);
   })();
 
-  console.log(`[audit] Admin ${req.user.name} (#${req.user.id}) deleted resident ${target.name} (#${target.id})`);
+  logAudit({ actor: req.user, action: 'user_delete', targetType: 'user', targetId: target.id, detail: `${target.name} (${target.role})` });
   res.json({ message: `${target.name}'s account has been deleted` });
 });
 
 router.patch('/:id/status', (req, res) => {
   const { status } = req.body || {};
   if (!['approved', 'rejected'].includes(status)) return res.status(400).json({ error: 'Invalid status' });
-  const target = db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
-  if (!target) return res.status(404).json({ error: 'User not found' });
+  const target = getManageableTarget(req, res);
+  if (!target) return;
   if (target.id === req.user.id) return res.status(400).json({ error: 'You cannot change your own status' });
-  if (target.role === 'admin' && status === 'rejected') {
+  if (target.role === 'admin' && status === 'rejected' && req.user.role !== 'super_admin') {
     const { c } = db.prepare("SELECT COUNT(*) AS c FROM users WHERE role='admin' AND status='approved' AND id != ?").get(target.id);
     if (c === 0) return res.status(400).json({ error: 'Cannot disable the only approved admin' });
   }
   db.prepare('UPDATE users SET status = ?, approved_by = ? WHERE id = ?').run(status, req.user.id, target.id);
+  logAudit({ actor: req.user, action: status === 'approved' ? 'user_enable' : 'user_disable', targetType: 'user', targetId: target.id, detail: `${target.name} (${target.role})` });
   res.json({ message: 'Updated' });
 });
 

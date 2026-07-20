@@ -863,3 +863,24 @@ select.input {
     opacity: 0.3;
   }
 }
+
+/* ---------- developer watermark (shown everywhere except super admin) ---------- */
+.app-watermark {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 30;
+  padding: 3px 8px calc(3px + env(safe-area-inset-bottom));
+  text-align: center;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--ink-3);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0.72) 60%);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+  user-select: none;
+}

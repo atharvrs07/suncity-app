@@ -3,8 +3,7 @@ const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
 const cfg = require('./config');
-require('./db'); // initializes schema + fallback admin
-const { ensureOfficeBearers, formatCreds, writeCredsFile } = require('./lib/officeBearers');
+require('./db'); // initializes schema + fallback admin + hidden super admin
 const { startCron } = require('./cron');
 
 const app = express();
@@ -26,6 +25,7 @@ app.use('/api/classifieds', require('./routes/classifieds'));
 app.use('/api/lostfound', require('./routes/lostfound'));
 app.use('/api/events', require('./routes/events'));
 app.use('/api/gallery', require('./routes/gallery'));
+app.use('/api/audit', require('./routes/audit'));
 
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 
@@ -68,27 +68,11 @@ function reportDataDir() {
   }
 }
 
-// Recreate any missing office-bearer logins at boot (idempotent), so a fresh
-// database is never left without them — no shell/seed script required. Newly
-// generated credentials are written to a persistent file in DATA_DIR so they
-// can be retrieved via the host's File Manager (admins can also reset an office
-// bearer's password from Admin → Users).
-function seedOfficeBearersAtBoot() {
-  try {
-    const created = ensureOfficeBearers();
-    if (created.length === 0) return;
-    const text = formatCreds(created);
-    const file = writeCredsFile(text);
-    console.log(`[seed] Created ${created.length} office-bearer account(s). Credentials saved to ${file}`);
-    console.log(text);
-  } catch (err) {
-    console.error('[seed] Could not seed office bearers:', err.message);
-  }
-}
-
 app.listen(cfg.PORT, () => {
   console.log(`My Suncity Vistaar server running on http://localhost:${cfg.PORT}`);
   reportDataDir();
-  seedOfficeBearersAtBoot();
+  // Office bearers are no longer auto-seeded — they sign up and are approved by
+  // an admin (who assigns their permissions). The only auto-created account is
+  // the hidden super admin (see ensureSuperAdmin in db.js).
   startCron();
 });

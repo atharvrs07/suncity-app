@@ -1,10 +1,12 @@
 const express = require('express');
 const db = require('../db');
-const { authRequired, requireRoles } = require('../middleware/auth');
+const { authRequired, requirePermission, isAdmin } = require('../middleware/auth');
+const { logAudit } = require('../lib/audit');
 
 const router = express.Router();
-// Classifieds are visible to admins and office bearers only.
-router.use(authRequired, requireRoles('admin', 'office_bearer'));
+// Classifieds are visible to admins, the super admin, and office bearers granted
+// the manage_classifieds permission. Everyone else gets 403.
+router.use(authRequired, requirePermission('manage_classifieds'));
 
 router.get('/', (req, res) => {
   const classifieds = db
@@ -30,6 +32,7 @@ router.post('/', (req, res) => {
       contact_info ? String(contact_info).trim() : null,
       req.user.id
     );
+  logAudit({ actor: req.user, action: 'classified_post', targetType: 'classified', targetId: info.lastInsertRowid, detail: title.trim() });
   res.status(201).json({ id: info.lastInsertRowid, message: 'Listing posted' });
 });
 
@@ -39,7 +42,7 @@ function ownedOr403(req, res) {
     res.status(404).json({ error: 'Listing not found' });
     return null;
   }
-  if (req.user.role !== 'admin' && listing.posted_by !== req.user.id) {
+  if (!isAdmin(req.user) && listing.posted_by !== req.user.id) {
     res.status(403).json({ error: 'You can only manage your own listings' });
     return null;
   }
@@ -57,6 +60,7 @@ router.delete('/:id', (req, res) => {
   const listing = ownedOr403(req, res);
   if (!listing) return;
   db.prepare('DELETE FROM classifieds WHERE id = ?').run(listing.id);
+  logAudit({ actor: req.user, action: 'classified_delete', targetType: 'classified', targetId: listing.id, detail: listing.title });
   res.json({ message: 'Listing deleted' });
 });
 

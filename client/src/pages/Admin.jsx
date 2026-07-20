@@ -1,14 +1,23 @@
 import { useState } from 'react';
-import { api, fmtMoney } from '../api';
+import { api, fmtMoney, fmtDateTime } from '../api';
 import { useFetch } from '../hooks';
 import { useAuth } from '../auth';
 import { GlassCard, Btn, Chip, Field, Toggle, Sheet, Segmented, Empty, Spinner, StaggerList, StaggerItem, PasswordInput } from '../components/Glass';
-import { roleLabel, BLOCKS } from '../constants';
+import { roleLabel, BLOCKS, OFFICE_BEARER_ROLES, OFFICE_BEARER_PERMISSIONS, SUPERVISOR_ROLES, permLabel } from '../constants';
 import BlockHousePicker from '../components/BlockHousePicker';
+
+// Roles an admin may assign from the editor (mirrors the server's ASSIGNABLE_ROLES).
+const ROLE_OPTIONS = [
+  { value: 'resident', label: 'Resident' },
+  { value: 'office_bearer', label: 'Office Bearer' },
+  { value: 'supervisor', label: 'Supervisor' },
+  { value: 'admin', label: 'Admin' },
+];
 
 const TABS = [
   { value: 'automations', label: 'Automated Dues' },
   { value: 'users', label: 'Users' },
+  { value: 'activity', label: 'Activity Log' },
   { value: 'society', label: 'Society' },
 ];
 
@@ -27,6 +36,7 @@ export default function Admin() {
       </div>
       {tab === 'automations' && <AutomationsTab />}
       {tab === 'users' && <UsersTab />}
+      {tab === 'activity' && <ActivityTab />}
       {tab === 'society' && <SocietyTab />}
     </>
   );
@@ -210,7 +220,7 @@ function AutomationsTab() {
   );
 }
 
-const emptyEdit = { name: '', phone: '', email: '', block: '', house_no: '', password: '' };
+const emptyEdit = { name: '', phone: '', email: '', block: '', house_no: '', role: 'resident', role_detail: '', permissions: [], password: '' };
 
 function UsersTab() {
   const { user: me } = useAuth();
@@ -262,10 +272,20 @@ function UsersTab() {
       email: u.email || '',
       block: u.block || '',
       house_no: u.house_no || '',
+      role: u.role,
+      role_detail: u.role_detail || '',
+      permissions: Array.isArray(u.permissions) ? u.permissions : [],
       password: '',
     });
     setEditErr('');
     setEditing(u);
+  }
+
+  function togglePerm(key) {
+    setForm((f) => {
+      const has = f.permissions.includes(key);
+      return { ...f, permissions: has ? f.permissions.filter((k) => k !== key) : [...f.permissions, key] };
+    });
   }
 
   async function saveEdit(e) {
@@ -275,8 +295,24 @@ function UsersTab() {
     // Send only what changed (and the password only if a new one was typed) so
     // untouched, format-sensitive fields aren't needlessly re-validated.
     const body = {};
-    for (const k of ['name', 'phone', 'email', 'block', 'house_no']) {
+    for (const k of ['name', 'phone', 'email']) {
       if ((form[k] || '') !== (editing[k] || '')) body[k] = form[k];
+    }
+    if (form.role === 'resident') {
+      for (const k of ['block', 'house_no']) {
+        if ((form[k] || '') !== (editing[k] || '')) body[k] = form[k];
+      }
+    }
+    const roleChanged = form.role !== editing.role;
+    if (roleChanged) body.role = form.role;
+    if (form.role === 'office_bearer') {
+      if (roleChanged || form.role_detail !== (editing.role_detail || '')) body.role_detail = form.role_detail;
+      const cur = Array.isArray(editing.permissions) ? editing.permissions : [];
+      const sel = form.permissions;
+      const permsChanged = cur.length !== sel.length || sel.some((k) => !cur.includes(k));
+      if (roleChanged || permsChanged) body.permissions = sel;
+    } else if (form.role === 'supervisor') {
+      if (roleChanged || form.role_detail !== (editing.role_detail || '')) body.role_detail = form.role_detail;
     }
     if (form.password) body.password = form.password;
     if (Object.keys(body).length === 0) {
@@ -296,7 +332,12 @@ function UsersTab() {
   }
 
   async function deleteUser(u) {
-    if (!confirm(`Permanently delete ${u.name}'s account? This also removes their complaints, dues and Lost & Found posts. This cannot be undone.`)) return;
+    if (
+      !confirm(
+        `Permanently delete ${u.name}'s account? Their complaints, dues and Lost & Found posts are removed; any notices/events/gallery/classifieds they posted are reassigned to you. This cannot be undone.`
+      )
+    )
+      return;
     try {
       await api(`/api/users/${u.id}`, { method: 'DELETE' });
       setEditing(null);
@@ -356,6 +397,14 @@ function UsersTab() {
                   {u.block ? ` · 🏢 ${u.block}` : ''}
                   {u.flat_no ? ` · Flat ${u.flat_no}` : ''}
                 </p>
+                {u.role === 'office_bearer' && (
+                  <p className="tiny" style={{ marginTop: 5 }}>
+                    🔑{' '}
+                    {Array.isArray(u.permissions) && u.permissions.length > 0
+                      ? u.permissions.map(permLabel).join(', ')
+                      : 'No permissions granted'}
+                  </p>
+                )}
                 <div className="row" style={{ marginTop: 9 }}>
                   {u.id !== me.id && u.status !== 'approved' && (
                     <Btn variant="success" sm onClick={() => setStatus(u, 'approved')}>
@@ -412,8 +461,92 @@ function UsersTab() {
                   placeholder="you@example.com"
                 />
               </Field>
+              {/* Role — lets an admin promote/demote. Hidden for the super admin,
+                  and locked when editing your own account. */}
+              {editing.role !== 'super_admin' && (
+                <Field label="ROLE">
+                  <select
+                    className="input"
+                    value={form.role}
+                    onChange={(e) => setForm((f) => ({ ...f, role: e.target.value }))}
+                    disabled={editing.id === me.id}
+                  >
+                    {ROLE_OPTIONS.map((r) => (
+                      <option key={r.value} value={r.value}>
+                        {r.label}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+              )}
+
+              {form.role === 'office_bearer' && (
+                <Field label="COMMITTEE POST">
+                  <select
+                    className="input"
+                    value={form.role_detail}
+                    onChange={(e) => setForm((f) => ({ ...f, role_detail: e.target.value }))}
+                    required
+                  >
+                    <option value="" disabled>
+                      Select a post
+                    </option>
+                    {OFFICE_BEARER_ROLES.map((r) => (
+                      <option key={r} value={r}>
+                        {r}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+              )}
+
+              {form.role === 'supervisor' && (
+                <Field label="SUPERVISOR TYPE">
+                  <select
+                    className="input"
+                    value={form.role_detail}
+                    onChange={(e) => setForm((f) => ({ ...f, role_detail: e.target.value }))}
+                    required
+                  >
+                    <option value="" disabled>
+                      Select a type
+                    </option>
+                    {SUPERVISOR_ROLES.map((r) => (
+                      <option key={r.value} value={r.value}>
+                        {r.label}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+              )}
+
+              {form.role === 'office_bearer' && (
+                <Field label="PERMISSIONS">
+                  <div className="stack" style={{ gap: 6 }}>
+                    {OFFICE_BEARER_PERMISSIONS.map((p) => (
+                      <label key={p.key} className="row" style={{ gap: 9, alignItems: 'flex-start', cursor: 'pointer' }}>
+                        <input
+                          type="checkbox"
+                          checked={form.permissions.includes(p.key)}
+                          onChange={() => togglePerm(p.key)}
+                          style={{ marginTop: 3 }}
+                        />
+                        <span>
+                          <span style={{ fontSize: 13.5, fontWeight: 600 }}>
+                            {p.emoji} {p.label}
+                          </span>
+                          <span className="tiny" style={{ display: 'block' }}>
+                            {p.desc}
+                          </span>
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                </Field>
+              )}
+
               {/* Block/house apply to residents; other roles have no society flat. */}
-              {editing.role === 'resident' && (
+              {form.role === 'resident' && (
                 <BlockHousePicker
                   block={form.block}
                   houseNo={form.house_no}
@@ -433,11 +566,11 @@ function UsersTab() {
               </Btn>
             </form>
 
-            {editing.role === 'resident' && editing.id !== me.id && (
+            {editing.role !== 'super_admin' && editing.id !== me.id && (
               <div style={{ marginTop: 18, paddingTop: 14, borderTop: '1px solid rgba(255,255,255,0.12)' }}>
                 <p className="tiny" style={{ marginBottom: 8 }}>
-                  Deleting removes the account and all of its complaints, dues and Lost &amp; Found posts. This
-                  can't be undone.
+                  Deleting removes the account and its complaints, dues and Lost &amp; Found posts. Any notices,
+                  events, gallery photos or classifieds it posted are reassigned to you. This can't be undone.
                 </p>
                 <Btn block variant="danger" onClick={() => deleteUser(editing)}>
                   Delete this account
@@ -476,6 +609,103 @@ function UsersTab() {
           </>
         )}
       </Sheet>
+    </>
+  );
+}
+
+const ACTION_LABELS = {
+  login: '🔑 Login',
+  resident_signup: '🙋 Resident joined',
+  staff_signup_request: '📝 Account request',
+  approve: '✅ Approved',
+  reject: '⛔ Rejected',
+  user_edit: '✏️ Account edited',
+  user_delete: '🗑️ Account deleted',
+  user_enable: '✅ Account enabled',
+  user_disable: '🚫 Account disabled',
+  admin_reset_password: '🔑 Password reset (by admin)',
+  password_change: '🔑 Password changed',
+  password_reset: '🔑 Password reset',
+  notice_post: '📢 Notice posted',
+  notice_delete: '📢 Notice deleted',
+  event_post: '🎉 Event posted',
+  event_delete: '🎉 Event deleted',
+  gallery_upload: '🖼️ Photo uploaded',
+  gallery_delete: '🖼️ Photo removed',
+  classified_post: '🏷️ Classified posted',
+  classified_delete: '🏷️ Classified deleted',
+  complaint_status: '📋 Complaint status',
+  due_create: '💳 Due created',
+  payment_verify: '💳 Payment verified',
+  payment_reject: '💳 Payment rejected',
+  lostfound_moderate_delete: '🔍 Lost & Found removed',
+};
+const prettyAction = (a) => ACTION_LABELS[a] || a;
+
+function ActivityTab() {
+  const [input, setInput] = useState('');
+  const [q, setQ] = useState('');
+  const { data, loading } = useFetch(`/api/audit?limit=250${q ? `&q=${encodeURIComponent(q)}` : ''}`);
+
+  function submitSearch(e) {
+    e.preventDefault();
+    setQ(input.trim());
+  }
+
+  const entries = data ? data.entries : [];
+  return (
+    <>
+      <form onSubmit={submitSearch} className="row" style={{ marginBottom: 12, gap: 8 }}>
+        <input
+          className="input"
+          placeholder="Search by name, action or detail…"
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+        />
+        <Btn sm type="submit">
+          Search
+        </Btn>
+        {q && (
+          <Btn
+            sm
+            variant="ghost"
+            type="button"
+            onClick={() => {
+              setInput('');
+              setQ('');
+            }}
+          >
+            Clear
+          </Btn>
+        )}
+      </form>
+
+      {loading && <Spinner />}
+      {!loading && entries.length === 0 && (
+        <Empty emoji="🗒️" title="No activity yet" sub="Actions across the app will appear here." />
+      )}
+
+      <StaggerList>
+        {entries.map((e) => (
+          <StaggerItem key={e.id}>
+            <GlassCard>
+              <div className="row-between">
+                <span className="title-sm">{prettyAction(e.action)}</span>
+                <span className="tiny">{fmtDateTime(e.created_at)}</span>
+              </div>
+              <p className="muted" style={{ marginTop: 4 }}>
+                {e.actor_name || 'system'}
+                {e.actor_role ? ` · ${e.actor_role}` : ''}
+              </p>
+              {e.detail && (
+                <p className="tiny" style={{ marginTop: 3 }}>
+                  {e.detail}
+                </p>
+              )}
+            </GlassCard>
+          </StaggerItem>
+        ))}
+      </StaggerList>
     </>
   );
 }

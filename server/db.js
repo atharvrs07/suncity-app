@@ -18,8 +18,9 @@ CREATE TABLE IF NOT EXISTS users (
   flat_no TEXT,
   block TEXT,
   house_no TEXT,
-  role TEXT NOT NULL CHECK (role IN ('admin','office_bearer','supervisor','resident')),
+  role TEXT NOT NULL CHECK (role IN ('super_admin','admin','office_bearer','supervisor','resident')),
   role_detail TEXT,
+  permissions TEXT,
   status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected')),
   approved_by INTEGER,
   oauth_provider TEXT,
@@ -170,6 +171,23 @@ CREATE TABLE IF NOT EXISTS signup_otps (
   last_sent_at TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Append-only activity log. Records account/security-relevant actions (logins,
+-- signups, approvals, edits, deletes, permission changes, payment reviews,
+-- content posts/removals) so admins and the super admin can review who did what.
+-- actor_* are snapshotted at write time so the row survives the actor's deletion.
+CREATE TABLE IF NOT EXISTS audit_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  actor_id INTEGER,
+  actor_name TEXT,
+  actor_role TEXT,
+  action TEXT NOT NULL,
+  target_type TEXT,
+  target_id INTEGER,
+  detail TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log (created_at DESC);
 `);
 
 // Migration for DBs created before office-bearer username login existed:
@@ -271,6 +289,60 @@ function migrateHouseNo() {
 }
 migrateHouseNo();
 
+// Migration for DBs created before the super_admin role + per-office-bearer
+// permissions existed. The role list is baked into a CHECK constraint, which
+// SQLite can only change via a table rebuild (new table, copy, drop, rename).
+// The rebuild also introduces the nullable `permissions` column. It is guarded
+// on the stored CREATE TABLE text so it runs at most once (and not at all on a
+// fresh DB, whose base schema already includes both).
+function migrateSuperAdminAndPermissions() {
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='users'").get();
+  if (row && row.sql && row.sql.includes('super_admin')) return;
+  console.log('[migrate] Rebuilding users table to add super_admin role + permissions…');
+  const cols = db.prepare('PRAGMA table_info(users)').all().map((c) => c.name);
+  const hasPermissions = cols.includes('permissions');
+  db.pragma('foreign_keys = OFF');
+  db.transaction(() => {
+    db.exec(`
+      CREATE TABLE users_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        phone TEXT UNIQUE,
+        username TEXT UNIQUE,
+        email TEXT UNIQUE,
+        password_hash TEXT NOT NULL,
+        flat_no TEXT,
+        block TEXT,
+        house_no TEXT,
+        role TEXT NOT NULL CHECK (role IN ('super_admin','admin','office_bearer','supervisor','resident')),
+        role_detail TEXT,
+        permissions TEXT,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected')),
+        approved_by INTEGER,
+        oauth_provider TEXT,
+        oauth_sub TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      INSERT INTO users_new (id, name, phone, username, email, password_hash, flat_no, block, house_no, role, role_detail, permissions, status, approved_by, oauth_provider, oauth_sub, created_at)
+        SELECT id, name, phone, username, email, password_hash, flat_no, block, house_no, role, role_detail,
+               ${hasPermissions ? 'permissions' : 'NULL'}, status, approved_by, oauth_provider, oauth_sub, created_at
+        FROM users;
+      DROP TABLE users;
+      ALTER TABLE users_new RENAME TO users;
+    `);
+  })();
+  db.pragma('foreign_keys = ON');
+  // Recreate the partial unique indexes that lived on the old users table.
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users (email) WHERE email IS NOT NULL');
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_oauth ON users (oauth_provider, oauth_sub) WHERE oauth_sub IS NOT NULL');
+  const violations = db.prepare('PRAGMA foreign_key_check').all();
+  if (violations.length > 0) {
+    throw new Error(`users super_admin migration left ${violations.length} foreign key violation(s)`);
+  }
+  console.log('[migrate] users table rebuilt with super_admin role + permissions.');
+}
+migrateSuperAdminAndPermissions();
+
 // The approval chain must never get stuck with zero admins: whenever no
 // approved admin exists, create (or promote) the fallback admin from env.
 function ensureSeedAdmin() {
@@ -290,5 +362,33 @@ function ensureSeedAdmin() {
 }
 ensureSeedAdmin();
 
+// The hidden super-admin account. Auto-seeded once, idempotently: if a
+// super_admin already exists it is left completely untouched (so an owner's
+// later password change persists across deploys). Otherwise, an existing
+// account matching the seed phone/email is promoted, or a fresh one is created.
+// This is the ONLY auto-generated account — everything else is signup + approval.
+function ensureSuperAdmin() {
+  const seed = cfg.SUPER_ADMIN_SEED;
+  const existingSuper = db.prepare("SELECT id FROM users WHERE role = 'super_admin'").get();
+  if (existingSuper) return;
+  const phone = String(seed.phone || '').replace(/\D/g, '').slice(-10);
+  const email = (seed.email || '').trim().toLowerCase() || null;
+  const byContact = db.prepare('SELECT id FROM users WHERE phone = ? OR (email IS NOT NULL AND email = ?)').get(phone, email);
+  if (byContact) {
+    db.prepare("UPDATE users SET role = 'super_admin', role_detail = NULL, permissions = NULL, status = 'approved' WHERE id = ?").run(
+      byContact.id
+    );
+    console.log('[seed] Promoted an existing account to the hidden super_admin.');
+    return;
+  }
+  const hash = bcrypt.hashSync(seed.password, 10);
+  db.prepare(
+    "INSERT INTO users (name, phone, email, password_hash, role, status) VALUES (?, ?, ?, ?, 'super_admin', 'approved')"
+  ).run(seed.name, phone, email, hash);
+  console.log('[seed] Created the hidden super_admin account (phone login).');
+}
+ensureSuperAdmin();
+
 module.exports = db;
 module.exports.ensureSeedAdmin = ensureSeedAdmin;
+module.exports.ensureSuperAdmin = ensureSuperAdmin;

@@ -19,7 +19,8 @@ npm start                # serve API + built SPA on PORT (default 4000)
 npm run dev              # server on 4000
 npm run dev:client       # Vite on 5173, proxies /api and /uploads to 4000
 
-node server/seed-office-bearers.js   # one-time seed of the 12 office-bearer accounts
+node server/seed-office-bearers.js   # OPTIONAL manual seed of 12 username-based office-bearer accounts
+                                     # (no longer auto-run; office bearers now sign up + get approved)
 ```
 
 There is no test framework or linter configured. `.env` (see `.env.example`) holds `JWT_SECRET`, `PORT`, `SOCIETY_UPI_*`, `ADMIN_SEED_*`. SQLite DB and uploads live in `data/` (override with `DATA_DIR`).
@@ -39,16 +40,18 @@ There is no test framework or linter configured. `.env` (see `.env.example`) hol
 ## Auth model (two login paths)
 
 1. Phone + password at `/login` (`POST /api/auth/login`) — admin, residents, supervisors.
-2. Office bearers: username + password at the **hidden** route `/ob/login` (`POST /api/auth/ob-login`). Intentionally not linked from any page or menu — keep it that way. Both paths issue the same JWT, so all RBAC middleware applies unchanged. The OB login returns a single generic error for all failures (no username enumeration), does a dummy bcrypt compare for unknown usernames, and rate-limits in memory (10 attempts / 15 min / IP).
+2. Office bearers / admins with a username: username + password at the **hidden** route `/ob/login` (`POST /api/auth/ob-login`, accepts `office_bearer` and `admin` username accounts). Intentionally not linked from any page or menu — keep it that way. Both paths issue the same JWT, so all RBAC middleware applies unchanged. The OB login returns a single generic error for all failures (no username enumeration), does a dummy bcrypt compare for unknown usernames, and rate-limits in memory (10 attempts / 15 min / IP). Note: office bearers/admins created via the signup dropdown log in by **phone** at `/login` once approved; `/ob/login` is only for username-based accounts.
 
 `users.phone` and `users.username` are both nullable + UNIQUE — a user has one or the other.
 
 ## Invariants (enforce on any change)
 
-- **RBAC lives on the API**, not just the UI. Hiding a menu item is never sufficient; the route must check roles. Roles: `admin`, `office_bearer` (12 named slots), `supervisor` (`maintenance` | `cleaning`), `resident`.
-  - Classifieds: admin + office_bearer only (others get 403).
-  - Approvals, Admin page, user management, automations, payment verification: admin only.
+- **RBAC lives on the API**, not just the UI. Hiding a menu item is never sufficient; the route must check roles/permissions. Roles: `super_admin` (hidden, all-powerful, auto-seeded), `admin`, `office_bearer` (12 named slots, each with a granted `permissions` set), `supervisor` (`maintenance` | `cleaning`), `resident`. `requireRoles` lets `super_admin` through every gate; `isAdmin(user)` = admin or super_admin; `hasPermission(user, perm)` is true for admin/super_admin and for office bearers holding `perm`.
+  - Module actions are gated by `requirePermission(...)` (`manage_notices`, `manage_events`, `manage_gallery`, `manage_classifieds`, `manage_complaints`, `manage_dues`, `manage_lostfound` — the `OFFICE_BEARER_PERMISSIONS` list). Office bearers act only where granted; admins/super_admin always pass. Classifieds still 403s for anyone without `manage_classifieds`.
+  - Approvals, Admin page, user management, automations, extensions: admin + super_admin only.
+  - **Super admin is secret**: hidden from the Users list and unmanageable (returns 404) by anyone who isn't the super_admin. Never surface it in UI; the developer watermark is suppressed for it. It is the ONLY auto-generated account (`ensureSuperAdmin` in `db.js`, idempotent — never overwrite an existing one).
   - Cleaning supervisors see only the `CLEANING_CATEGORIES` complaints; maintenance supervisors see everything except those.
-  - Notices with `admin_only=1` are visible to admins only; only admins can set the flag.
-- **Approval chain**: every signup (any role, including admin) starts `pending` and cannot log in. Only admins approve; self-approval is blocked. `ensureSeedAdmin()` promotes/creates the env-seeded admin whenever zero approved admins exist, so the chain can never dead-lock.
+  - Notices with `admin_only=1` are visible to admins/super_admin only; only they can set the flag.
+- **Approval chain**: resident signups self-activate via email OTP (created `approved`). Office-bearer/admin signups (`POST /api/auth/signup-staff`, account-type dropdown on `/signup`) start `pending`, no OTP, and an admin approves — choosing the office bearer's permissions at approval. Self-approval is blocked; `ensureSeedAdmin()` promotes/creates the env-seeded admin whenever zero approved admins exist, and the super admin is a further fallback, so the chain can never dead-lock.
+- **Activity log**: account/auth/approval/payment/content events are written via `lib/audit.js` (`logAudit`) to the `audit_log` table; readable at `GET /api/audit` and Admin → Activity Log by admin + super_admin. Prefer `logAudit(...)` over ad-hoc `console.log('[audit] …')` for anything security-relevant.
 - **Dues**: UPI QR is generated client-side (`upi://pay?...&tr=DUE{id}`); resident submits a UTR, admin verifies/rejects. Automation dedupe relies on the partial unique index on `(automation_id, user_id, period_key)`. Extension requests are capped at 5 days total per due (summed over pending + approved), enforced server-side.

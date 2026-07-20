@@ -1,19 +1,27 @@
 const express = require('express');
 const db = require('../db');
 const cfg = require('../config');
-const { authRequired, requireRoles } = require('../middleware/auth');
+const { authRequired, isAdmin, hasPermission } = require('../middleware/auth');
+const { logAudit } = require('../lib/audit');
 const upload = require('../lib/uploads');
 
 const router = express.Router();
 router.use(authRequired);
 
-const MANAGER_ROLES = ['admin', 'office_bearer', 'supervisor'];
 const cleaningPlaceholders = cfg.CLEANING_CATEGORIES.map(() => '?').join(',');
 
-// Category visibility per role: cleaning supervisor sees ONLY cleaning
-// categories; maintenance supervisor sees everything EXCEPT them.
+// Who can view/action every complaint (subject to a supervisor's category
+// scope): admins, the super admin, and office bearers granted manage_complaints.
+function canManage(user) {
+  return isAdmin(user) || user.role === 'supervisor' || hasPermission(user, 'manage_complaints');
+}
+
+// Category visibility per role: admin/super_admin and office bearers with
+// manage_complaints see everything; cleaning supervisor sees ONLY cleaning
+// categories; maintenance supervisor sees everything EXCEPT them; everyone else
+// (residents, and office bearers without the permission) sees only their own.
 function scopeFor(user) {
-  if (user.role === 'admin' || user.role === 'office_bearer') return { sql: '1=1', params: [] };
+  if (isAdmin(user) || hasPermission(user, 'manage_complaints')) return { sql: '1=1', params: [] };
   if (user.role === 'supervisor') {
     return user.role_detail === 'cleaning'
       ? { sql: `c.category IN (${cleaningPlaceholders})`, params: cfg.CLEANING_CATEGORIES }
@@ -32,7 +40,7 @@ router.get('/', (req, res) => {
        ORDER BY CASE c.status WHEN 'open' THEN 0 WHEN 'in_progress' THEN 1 WHEN 'resolved' THEN 2 ELSE 3 END, c.created_at DESC`
     )
     .all(...scope.params);
-  res.json({ complaints: rows, can_manage: MANAGER_ROLES.includes(req.user.role) });
+  res.json({ complaints: rows, can_manage: canManage(req.user) });
 });
 
 router.post('/', upload.single('photo'), (req, res) => {
@@ -47,7 +55,8 @@ router.post('/', upload.single('photo'), (req, res) => {
   res.status(201).json({ id: info.lastInsertRowid, message: 'Complaint submitted' });
 });
 
-router.patch('/:id/status', requireRoles(...MANAGER_ROLES), (req, res) => {
+router.patch('/:id/status', (req, res) => {
+  if (!canManage(req.user)) return res.status(403).json({ error: 'Not allowed' });
   const { status } = req.body || {};
   if (!cfg.COMPLAINT_STATUSES.includes(status)) return res.status(400).json({ error: 'Invalid status' });
   const complaint = db.prepare('SELECT * FROM complaints WHERE id = ?').get(req.params.id);
@@ -58,6 +67,7 @@ router.patch('/:id/status', requireRoles(...MANAGER_ROLES), (req, res) => {
     if (!allowed) return res.status(403).json({ error: 'This complaint is outside your category' });
   }
   db.prepare("UPDATE complaints SET status = ?, updated_at = datetime('now') WHERE id = ?").run(status, complaint.id);
+  logAudit({ actor: req.user, action: 'complaint_status', targetType: 'complaint', targetId: complaint.id, detail: `→ ${status}` });
   res.json({ message: 'Status updated' });
 });
 

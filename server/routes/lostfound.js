@@ -1,10 +1,15 @@
 const express = require('express');
 const db = require('../db');
-const { authRequired } = require('../middleware/auth');
+const { authRequired, hasPermission } = require('../middleware/auth');
+const { logAudit } = require('../lib/audit');
 const upload = require('../lib/uploads');
 
 const router = express.Router();
 router.use(authRequired);
+
+// Moderators (admin/super_admin, or an office bearer granted manage_lostfound)
+// may resolve or delete anyone's post; otherwise only the original poster can.
+const canModerate = (user) => hasPermission(user, 'manage_lostfound');
 
 router.get('/', (req, res) => {
   const items = db
@@ -42,8 +47,8 @@ router.post('/', upload.single('photo'), (req, res) => {
 router.patch('/:id/resolve', (req, res) => {
   const item = db.prepare('SELECT * FROM lost_found WHERE id = ?').get(req.params.id);
   if (!item) return res.status(404).json({ error: 'Item not found' });
-  if (req.user.role !== 'admin' && item.posted_by !== req.user.id) {
-    return res.status(403).json({ error: 'Only the poster or an admin can resolve this' });
+  if (!canModerate(req.user) && item.posted_by !== req.user.id) {
+    return res.status(403).json({ error: 'Only the poster or a moderator can resolve this' });
   }
   db.prepare("UPDATE lost_found SET status = 'resolved' WHERE id = ?").run(item.id);
   res.json({ message: 'Marked as resolved' });
@@ -52,10 +57,14 @@ router.patch('/:id/resolve', (req, res) => {
 router.delete('/:id', (req, res) => {
   const item = db.prepare('SELECT * FROM lost_found WHERE id = ?').get(req.params.id);
   if (!item) return res.status(404).json({ error: 'Item not found' });
-  if (req.user.role !== 'admin' && item.posted_by !== req.user.id) {
-    return res.status(403).json({ error: 'Only the poster or an admin can delete this' });
+  const moderating = canModerate(req.user) && item.posted_by !== req.user.id;
+  if (!canModerate(req.user) && item.posted_by !== req.user.id) {
+    return res.status(403).json({ error: 'Only the poster or a moderator can delete this' });
   }
   db.prepare('DELETE FROM lost_found WHERE id = ?').run(item.id);
+  if (moderating) {
+    logAudit({ actor: req.user, action: 'lostfound_moderate_delete', targetType: 'lost_found', targetId: item.id, detail: item.title });
+  }
   res.json({ message: 'Deleted' });
 });
 

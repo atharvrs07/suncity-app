@@ -1,11 +1,16 @@
 const express = require('express');
 const db = require('../db');
 const cfg = require('../config');
-const { authRequired, requireRoles } = require('../middleware/auth');
+const { authRequired, requirePermission } = require('../middleware/auth');
+const { logAudit } = require('../lib/audit');
 const { localDateStr } = require('../lib/dates');
 
 const router = express.Router();
 router.use(authRequired);
+
+// Dues administration is grantable to office bearers via the manage_dues
+// permission (admins and the super admin always pass).
+const canManageDues = requirePermission('manage_dues');
 
 const LATEST_PAYMENT = `(
   SELECT json_object('id', p.id, 'utr_reference', p.utr_reference, 'status', p.status, 'created_at', p.created_at)
@@ -51,7 +56,7 @@ router.post('/:id/payment', (req, res) => {
 
 // ---- Admin ----
 
-router.get('/', requireRoles('admin'), (req, res) => {
+router.get('/', canManageDues, (req, res) => {
   const { status } = req.query;
   const where = status ? 'd.status = ?' : '1=1';
   const dues = db
@@ -66,7 +71,7 @@ router.get('/', requireRoles('admin'), (req, res) => {
   res.json({ dues });
 });
 
-router.post('/', requireRoles('admin'), (req, res) => {
+router.post('/', canManageDues, (req, res) => {
   const { user_id, all_residents, amount, period_label, due_date } = req.body || {};
   const amt = Number(amount);
   if (!Number.isFinite(amt) || amt <= 0) return res.status(400).json({ error: 'Enter a valid amount' });
@@ -80,15 +85,17 @@ router.post('/', requireRoles('admin'), (req, res) => {
       for (const r of residents) insert.run(r.id, amt, period_label.trim(), due_date);
     });
     tx();
+    logAudit({ actor: req.user, action: 'due_create', detail: `${period_label.trim()} · ₹${amt} · all residents (${residents.length})` });
     return res.status(201).json({ message: `Due created for ${residents.length} resident(s)` });
   }
   const target = db.prepare("SELECT id FROM users WHERE id = ? AND status = 'approved'").get(user_id);
   if (!target) return res.status(400).json({ error: 'Pick an approved resident' });
   insert.run(target.id, amt, period_label.trim(), due_date);
+  logAudit({ actor: req.user, action: 'due_create', targetType: 'user', targetId: target.id, detail: `${period_label.trim()} · ₹${amt}` });
   res.status(201).json({ message: 'Due created' });
 });
 
-router.patch('/:id/mark-paid', requireRoles('admin'), (req, res) => {
+router.patch('/:id/mark-paid', canManageDues, (req, res) => {
   const due = db.prepare('SELECT * FROM dues WHERE id = ?').get(req.params.id);
   if (!due) return res.status(404).json({ error: 'Due not found' });
   db.prepare("UPDATE dues SET status = 'paid' WHERE id = ?").run(due.id);
@@ -97,7 +104,7 @@ router.patch('/:id/mark-paid', requireRoles('admin'), (req, res) => {
 
 // Auto-generated Overdue Watch list (admin only): overdue residents with a
 // call CTA on the client and a mark-as-paid action.
-router.get('/overdue-watch', requireRoles('admin'), (req, res) => {
+router.get('/overdue-watch', canManageDues, (req, res) => {
   const rows = db
     .prepare(
       `SELECT d.id AS due_id, d.amount, d.period_label, d.due_date,
@@ -111,7 +118,7 @@ router.get('/overdue-watch', requireRoles('admin'), (req, res) => {
   res.json({ overdue: rows });
 });
 
-router.get('/payments/list', requireRoles('admin'), (req, res) => {
+router.get('/payments/list', canManageDues, (req, res) => {
   const status = req.query.status || 'submitted';
   const payments = db
     .prepare(
@@ -123,7 +130,7 @@ router.get('/payments/list', requireRoles('admin'), (req, res) => {
   res.json({ payments });
 });
 
-router.post('/payments/:pid/verify', requireRoles('admin'), (req, res) => {
+router.post('/payments/:pid/verify', canManageDues, (req, res) => {
   const payment = db.prepare('SELECT * FROM payments WHERE id = ?').get(req.params.pid);
   if (!payment) return res.status(404).json({ error: 'Payment not found' });
   if (payment.status !== 'submitted') return res.status(400).json({ error: 'Payment already reviewed' });
@@ -135,10 +142,11 @@ router.post('/payments/:pid/verify', requireRoles('admin'), (req, res) => {
     db.prepare("UPDATE dues SET status = 'paid' WHERE id = ?").run(payment.due_id);
   });
   tx();
+  logAudit({ actor: req.user, action: 'payment_verify', targetType: 'payment', targetId: payment.id, detail: `UTR ${payment.utr_reference}` });
   res.json({ message: 'Payment verified — due marked paid' });
 });
 
-router.post('/payments/:pid/reject', requireRoles('admin'), (req, res) => {
+router.post('/payments/:pid/reject', canManageDues, (req, res) => {
   const payment = db.prepare('SELECT * FROM payments WHERE id = ?').get(req.params.pid);
   if (!payment) return res.status(404).json({ error: 'Payment not found' });
   if (payment.status !== 'submitted') return res.status(400).json({ error: 'Payment already reviewed' });
@@ -152,6 +160,7 @@ router.post('/payments/:pid/reject', requireRoles('admin'), (req, res) => {
     db.prepare('UPDATE dues SET status = ? WHERE id = ?').run(backTo, payment.due_id);
   });
   tx();
+  logAudit({ actor: req.user, action: 'payment_reject', targetType: 'payment', targetId: payment.id, detail: `UTR ${payment.utr_reference}` });
   res.json({ message: 'Payment rejected — resident can resubmit' });
 });
 
