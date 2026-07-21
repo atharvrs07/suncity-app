@@ -1,19 +1,37 @@
 import { useEffect, useState } from 'react';
-import QRCode from 'qrcode';
+import { useTranslation } from 'react-i18next';
 import { api, fmtMoney, fmtDate, todayStr } from '../api';
 import { useFetch } from '../hooks';
 import { useAuth } from '../auth';
 import { GlassCard, Btn, Chip, Field, Toggle, Sheet, Segmented, Empty, Spinner, StaggerList, StaggerItem } from '../components/Glass';
-import { DUE_STATUS } from '../constants';
+import PaymentQR from '../components/PaymentQR';
+import CallButton from '../components/CallButton';
+import { DUE_STATUS, BLOCKS, hasPerm } from '../constants';
 
 export default function Dues() {
   const { user } = useAuth();
-  return user.role === 'admin' ? <AdminDues /> : <MyDues />;
+  // Admins, the super admin, and office bearers granted manage_dues get the
+  // management view; everyone else sees their own dues.
+  return hasPerm(user, 'manage_dues') ? <AdminDues /> : <MyDues />;
 }
 
 /* ---------------- resident view ---------------- */
 
+// The lifecycle badge for a due, making the payment state explicit (item 22):
+// Submitted → AI-checked (provisional receipt) / Flagged → Verified.
+function paymentState(d) {
+  const p = d.latest_payment;
+  if (d.status === 'paid') return { label: p && p.receipt_at ? 'Paid · receipt emailed' : 'Paid', tone: 'green' };
+  if (d.status === 'submitted') {
+    if (p && p.ai_verdict === 'pass') return { label: 'AI-checked · provisional receipt sent', tone: 'blue' };
+    if (p && (p.ai_verdict === 'suspicious' || p.ai_verdict === 'error')) return { label: 'Flagged for manual review', tone: 'orange' };
+    return { label: 'Awaiting verification', tone: 'blue' };
+  }
+  return DUE_STATUS[d.status] || null;
+}
+
 function MyDues() {
+  const { t } = useTranslation();
   const { data, loading, reload } = useFetch('/api/dues/mine');
   const [paying, setPaying] = useState(null);
   const [extending, setExtending] = useState(null);
@@ -22,47 +40,59 @@ function MyDues() {
     <>
       <div className="page-head">
         <div>
-          <h1 className="page-title">Dues</h1>
-          <p className="page-sub">Pay via UPI and submit your UTR reference</p>
+          <h1 className="page-title">{t('dues.title')}</h1>
+          <p className="page-sub">Pay via UPI — enter your UTR or upload a screenshot</p>
         </div>
       </div>
 
       {loading && <Spinner />}
       {!loading && data && data.dues.length === 0 && (
-        <Empty emoji="🎉" title="No dues" sub="You're all settled up!" />
+        <Empty emoji="🎉" title={t('home.noDues')} sub={t('home.allClear')} />
       )}
 
       <StaggerList>
         {data &&
           data.dues.map((d) => {
-            const st = DUE_STATUS[d.status];
+            const st = paymentState(d);
             const payable = ['pending', 'overdue'].includes(d.status);
             const extLeft = 5 - (d.extension_days_used || 0);
+            const p = d.latest_payment;
             return (
               <StaggerItem key={d.id}>
                 <GlassCard>
                   <div className="row-between">
                     <span className="title-sm">{d.period_label}</span>
-                    <Chip tone={st.tone}>{st.label}</Chip>
+                    {st && <Chip tone={st.tone}>{st.label}</Chip>}
                   </div>
                   <div className="row-between" style={{ marginTop: 8 }}>
                     <span style={{ fontSize: 22, fontWeight: 800 }}>{fmtMoney(d.amount)}</span>
                     <span className="muted">Due {fmtDate(d.due_date)}</span>
                   </div>
-                  {d.status === 'submitted' && d.latest_payment && (
-                    <p className="tiny" style={{ marginTop: 6 }}>
-                      UTR {d.latest_payment.utr_reference} — waiting for admin verification
+                  {d.status === 'submitted' && p && p.ai_verdict === 'pass' && (
+                    <p className="tiny" style={{ marginTop: 6, color: 'var(--green)' }}>
+                      ✓ Screenshot checked — a provisional receipt was emailed. Awaiting final verification by the society.
                     </p>
                   )}
-                  {d.latest_payment && d.latest_payment.status === 'rejected' && payable && (
+                  {d.status === 'submitted' && p && (p.ai_verdict === 'suspicious' || p.ai_verdict === 'error') && (
+                    <p className="tiny" style={{ marginTop: 6, color: 'var(--orange)' }}>
+                      ⚠ {p.ai_reason || 'This payment needs manual verification by the society office.'}
+                    </p>
+                  )}
+                  {d.status === 'submitted' && (!p || !p.ai_verdict) && (
+                    <p className="tiny" style={{ marginTop: 6 }}>
+                      {p && p.utr_reference && p.utr_reference !== 'via-screenshot' ? <>UTR {p.utr_reference} — </> : null}
+                      waiting for verification
+                    </p>
+                  )}
+                  {p && p.status === 'rejected' && payable && (
                     <p className="tiny" style={{ marginTop: 6, color: 'var(--red)' }}>
-                      Last payment was rejected — please resubmit
+                      Last payment couldn’t be verified — please resubmit
                     </p>
                   )}
                   {payable && (
-                    <div className="row" style={{ marginTop: 12 }}>
+                    <div className="row wrap" style={{ marginTop: 12 }}>
                       <Btn sm onClick={() => setPaying(d)}>
-                        💳 Pay Now
+                        💳 {t('dues.pay')}
                       </Btn>
                       {extLeft > 0 && (
                         <Btn variant="ghost" sm onClick={() => setExtending(d)}>
@@ -84,68 +114,91 @@ function MyDues() {
 }
 
 function PaySheet({ due, onClose, onDone }) {
-  const [qr, setQr] = useState(null);
-  const [upi, setUpi] = useState(null);
+  const { t } = useTranslation();
   const [utr, setUtr] = useState('');
+  const [screenshot, setScreenshot] = useState(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState(null); // { message, ai }
 
   useEffect(() => {
-    if (!due) return;
-    setQr(null);
     setUtr('');
+    setScreenshot(null);
     setError('');
-    api('/api/dues/upi-config').then((cfg) => {
-      setUpi(cfg);
-      const uri = `upi://pay?pa=${encodeURIComponent(cfg.vpa)}&pn=${encodeURIComponent(cfg.payee_name)}&am=${due.amount}&tr=DUE${due.id}&cu=INR`;
-      QRCode.toDataURL(uri, { width: 260, margin: 2 }).then(setQr);
-    }).catch((e) => setError(e.message));
+    setResult(null);
+    setBusy(false);
   }, [due]);
 
   async function submit(e) {
     e.preventDefault();
+    if (!screenshot && utr.trim().length < 6) {
+      setError('Enter your UTR / reference or upload a payment screenshot.');
+      return;
+    }
     setBusy(true);
     setError('');
     try {
-      await api(`/api/dues/${due.id}/payment`, { method: 'POST', body: { utr_reference: utr } });
-      onDone();
+      const fd = new FormData();
+      if (utr.trim()) fd.append('utr_reference', utr.trim());
+      if (screenshot) fd.append('screenshot', screenshot);
+      const r = await api(`/api/dues/${due.id}/payment`, { method: 'POST', form: fd });
+      setResult(r);
     } catch (err) {
       setError(err.message);
+    } finally {
       setBusy(false);
     }
   }
 
   return (
-    <Sheet open={!!due} onClose={onClose} title={due ? `Pay ${fmtMoney(due.amount)}` : ''}>
+    <Sheet open={!!due} onClose={onClose} title={due ? `${t('dues.pay')} ${fmtMoney(due.amount)}` : ''}>
       {due && (
         <>
           {error && <div className="err-banner">{error}</div>}
-          <div style={{ textAlign: 'center' }}>
-            {qr ? (
-              <img src={qr} alt="UPI QR code" style={{ borderRadius: 18, background: '#fff', padding: 6 }} />
-            ) : (
-              <Spinner />
-            )}
-            {upi && (
-              <p className="muted" style={{ marginTop: 6 }}>
-                Scan with any UPI app · {upi.vpa}
-              </p>
-            )}
-          </div>
-          <form onSubmit={submit} style={{ marginTop: 16 }}>
-            <Field label="UTR / TRANSACTION REFERENCE">
-              <input
-                className="input"
-                value={utr}
-                onChange={(e) => setUtr(e.target.value)}
-                placeholder="From your UPI app after paying"
-                required
-              />
-            </Field>
-            <Btn block disabled={busy} type="submit">
-              {busy ? 'Submitting…' : 'Submit for Verification'}
-            </Btn>
-          </form>
+
+          {result ? (
+            <>
+              <div
+                className={result.ai && (result.ai.verdict === 'suspicious' || result.ai.verdict === 'error') ? 'err-banner' : 'ok-banner'}
+              >
+                {result.message}
+              </div>
+              {result.ai && result.ai.txn_id && (
+                <p className="tiny">Detected transaction ID: <b className="break-anywhere">{result.ai.txn_id}</b></p>
+              )}
+              {result.ai && result.ai.reason && (
+                <p className="tiny" style={{ marginTop: 4 }}>{result.ai.reason}</p>
+              )}
+              <Btn block style={{ marginTop: 14 }} onClick={onDone}>
+                Done
+              </Btn>
+            </>
+          ) : (
+            <>
+              <PaymentQR amount={due.amount} tr={`DUE${due.id}`} />
+              <form onSubmit={submit} style={{ marginTop: 16 }}>
+                <Field label="PAYMENT SCREENSHOT (RECOMMENDED — AI-CHECKED)">
+                  <input
+                    className="input"
+                    type="file"
+                    accept="image/*"
+                    onChange={(e) => setScreenshot(e.target.files[0] || null)}
+                  />
+                </Field>
+                <Field label="UTR / TRANSACTION REFERENCE (OPTIONAL IF SCREENSHOT ADDED)">
+                  <input
+                    className="input break-anywhere"
+                    value={utr}
+                    onChange={(e) => setUtr(e.target.value)}
+                    placeholder="From your UPI app after paying"
+                  />
+                </Field>
+                <Btn block disabled={busy} type="submit">
+                  {busy ? (screenshot ? t('dues.aiChecking') : 'Submitting…') : 'Submit for Verification'}
+                </Btn>
+              </form>
+            </>
+          )}
         </>
       )}
     </Sheet>
@@ -221,15 +274,20 @@ const ADMIN_TABS = [
 ];
 
 function AdminDues() {
+  const { t } = useTranslation();
   const [tab, setTab] = useState('payments');
   return (
     <>
       <div className="page-head">
         <div>
-          <h1 className="page-title">Dues</h1>
+          <h1 className="page-title">{t('dues.title')}</h1>
           <p className="page-sub">Payments, verification & overdue tracking</p>
         </div>
       </div>
+
+      {/* Always-visible unpaid-residents drill-down (item 19). */}
+      <UnpaidCard />
+
       <div style={{ marginBottom: 14 }}>
         <Segmented options={ADMIN_TABS} value={tab} onChange={setTab} />
       </div>
@@ -241,12 +299,59 @@ function AdminDues() {
   );
 }
 
+// Count of residents with unpaid dues; tap to expand the full list, each with a
+// Call CTA (item 19). Reuses the collections Call button + its phone branching.
+function UnpaidCard() {
+  const { data } = useFetch('/api/dues/unpaid-residents');
+  const [open, setOpen] = useState(false);
+  if (!data) return null;
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <GlassCard className="card-press" onClick={() => setOpen((o) => !o)}>
+        <div className="row-between">
+          <div className="grow">
+            <div className="title-sm">Residents who haven’t paid</div>
+            <div className="muted">Tap to {open ? 'hide' : 'view'} the list & call them</div>
+          </div>
+          <div style={{ textAlign: 'right' }}>
+            <div style={{ fontSize: 30, fontWeight: 800, letterSpacing: '-0.03em', lineHeight: 1 }}>{data.count}</div>
+            <div className="tiny">unpaid</div>
+          </div>
+        </div>
+      </GlassCard>
+      {open && data.residents.length > 0 && (
+        <div className="stack" style={{ marginTop: 10 }}>
+          {data.residents.map((r) => (
+            <GlassCard key={r.user_id}>
+              <div className="row-between">
+                <span className="title-sm">
+                  {r.name}
+                  {r.flat_no ? ` (${r.flat_no})` : ''}
+                </span>
+                <span style={{ fontWeight: 800 }}>{fmtMoney(r.unpaid_amount || 0)}</span>
+              </div>
+              <div className="row-between" style={{ marginTop: 5 }}>
+                <span className="muted">
+                  {r.block ? `${r.block} · ` : ''}
+                  {r.unpaid_count} unpaid{r.overdue_count ? ` · ${r.overdue_count} overdue` : ''}
+                </span>
+                <CallButton phone={r.phone} name={r.name} />
+              </div>
+            </GlassCard>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function PaymentsTab() {
   const { data, loading, reload } = useFetch('/api/dues/payments/list?status=submitted');
 
   async function act(id, action) {
     try {
-      await api(`/api/dues/payments/${id}/${action}`, { method: 'POST' });
+      const r = await api(`/api/dues/payments/${id}/${action}`, { method: 'POST' });
+      if (r.message) alert(r.message);
       reload();
     } catch (err) {
       alert(err.message);
@@ -259,33 +364,55 @@ function PaymentsTab() {
 
   return (
     <StaggerList>
-      {data.payments.map((p) => (
-        <StaggerItem key={p.id}>
-          <GlassCard>
-            <div className="row-between">
-              <span className="title-sm">
-                {p.resident_name}
-                {p.resident_flat ? ` (${p.resident_flat})` : ''}
-              </span>
-              <span style={{ fontWeight: 800 }}>{fmtMoney(p.amount)}</span>
-            </div>
-            <p className="muted" style={{ marginTop: 4 }}>
-              {p.period_label}
-            </p>
-            <p className="tiny" style={{ marginTop: 4 }}>
-              UTR: <b>{p.utr_reference}</b>
-            </p>
-            <div className="row" style={{ marginTop: 10 }}>
-              <Btn variant="success" sm onClick={() => act(p.id, 'verify')}>
-                ✓ Verify
-              </Btn>
-              <Btn variant="danger" sm onClick={() => act(p.id, 'reject')}>
-                ✕ Reject
-              </Btn>
-            </div>
-          </GlassCard>
-        </StaggerItem>
-      ))}
+      {data.payments.map((p) => {
+        const verdictChip =
+          p.ai_verdict === 'pass'
+            ? { tone: 'green', label: 'AI: looks genuine' }
+            : p.ai_verdict === 'suspicious'
+              ? { tone: 'orange', label: 'AI: flagged' }
+              : p.ai_verdict === 'error'
+                ? { tone: 'gray', label: 'AI: unchecked' }
+                : null;
+        return (
+          <StaggerItem key={p.id}>
+            <GlassCard>
+              <div className="row-between">
+                <span className="title-sm">
+                  {p.resident_name}
+                  {p.resident_flat ? ` (${p.resident_flat})` : ''}
+                </span>
+                <span style={{ fontWeight: 800 }}>{fmtMoney(p.amount)}</span>
+              </div>
+              <p className="muted" style={{ marginTop: 4 }}>{p.period_label}</p>
+              <p className="tiny break-anywhere" style={{ marginTop: 4 }}>
+                Txn / UTR: <b>{p.txn_id || p.utr_reference}</b>
+                {p.txn_datetime ? ` · ${p.txn_datetime}` : ''}
+              </p>
+              {/* Gemini's assist for the human decision (item 22). */}
+              {verdictChip && (
+                <div className="row wrap" style={{ marginTop: 8, gap: 8 }}>
+                  <Chip tone={verdictChip.tone}>{verdictChip.label}</Chip>
+                  {p.provisional_receipt_at && <Chip tone="blue">Provisional receipt sent</Chip>}
+                </div>
+              )}
+              {p.ai_reason && <p className="tiny" style={{ marginTop: 6 }}>{p.ai_reason}</p>}
+              {p.screenshot && (
+                <a href={p.screenshot} target="_blank" rel="noreferrer" className="more-link" style={{ marginTop: 6 }}>
+                  🖼️ View screenshot
+                </a>
+              )}
+              <div className="row" style={{ marginTop: 10 }}>
+                <Btn variant="success" sm onClick={() => act(p.id, 'verify')}>
+                  ✓ Verify & send receipt
+                </Btn>
+                <Btn variant="danger" sm onClick={() => act(p.id, 'reject')}>
+                  ✕ Reject
+                </Btn>
+              </div>
+            </GlassCard>
+          </StaggerItem>
+        );
+      })}
     </StaggerList>
   );
 }
@@ -295,6 +422,8 @@ function AllDuesTab() {
   const { data, loading, reload } = useFetch(`/api/dues${status ? `?status=${status}` : ''}`);
   const [showNew, setShowNew] = useState(false);
   const [residents, setResidents] = useState([]);
+  const [perBlock, setPerBlock] = useState(false);
+  const [blockAmounts, setBlockAmounts] = useState({});
   const [form, setForm] = useState({ all_residents: true, user_id: '', amount: '', period_label: '', due_date: todayStr() });
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -308,8 +437,25 @@ function AllDuesTab() {
     setBusy(true);
     setError('');
     try {
-      await api('/api/dues', { method: 'POST', body: { ...form, user_id: form.user_id || undefined } });
+      const body = {
+        all_residents: form.all_residents,
+        user_id: form.all_residents ? undefined : form.user_id || undefined,
+        amount: form.amount,
+        period_label: form.period_label,
+        due_date: form.due_date,
+      };
+      // Per-block overrides only apply to an all-residents due (item 19).
+      if (form.all_residents && perBlock) {
+        const map = {};
+        for (const [b, v] of Object.entries(blockAmounts)) {
+          if (v !== '' && v != null) map[b] = Number(v);
+        }
+        if (Object.keys(map).length) body.block_amounts = map;
+      }
+      await api('/api/dues', { method: 'POST', body });
       setShowNew(false);
+      setPerBlock(false);
+      setBlockAmounts({});
       reload();
     } catch (err) {
       setError(err.message);
@@ -362,7 +508,7 @@ function AllDuesTab() {
                     <Chip tone={st.tone}>{st.label}</Chip>
                   </div>
                   <div className="row-between" style={{ marginTop: 5 }}>
-                    <span className="muted">{d.period_label}</span>
+                    <span className="muted">{d.period_label}{d.resident_block ? ` · ${d.resident_block}` : ''}</span>
                     <span style={{ fontWeight: 800 }}>{fmtMoney(d.amount)}</span>
                   </div>
                   <div className="row-between" style={{ marginTop: 6 }}>
@@ -406,7 +552,7 @@ function AllDuesTab() {
               </select>
             </Field>
           )}
-          <Field label="AMOUNT (₹)">
+          <Field label={perBlock ? 'DEFAULT AMOUNT (₹) — used for blocks below left blank' : 'AMOUNT (₹)'}>
             <input
               className="input"
               type="number"
@@ -417,6 +563,28 @@ function AllDuesTab() {
               required
             />
           </Field>
+          {form.all_residents && (
+            <Toggle label="Different amount per block" checked={perBlock} onChange={setPerBlock} />
+          )}
+          {form.all_residents && perBlock && (
+            <div className="stack" style={{ marginBottom: 13 }}>
+              {BLOCKS.map((b) => (
+                <div className="row-between" key={b}>
+                  <span style={{ fontSize: 13.5, fontWeight: 600 }}>{b}</span>
+                  <input
+                    className="input"
+                    type="number"
+                    min="1"
+                    step="0.01"
+                    style={{ maxWidth: 140 }}
+                    placeholder="default"
+                    value={blockAmounts[b] || ''}
+                    onChange={(e) => setBlockAmounts((m) => ({ ...m, [b]: e.target.value }))}
+                  />
+                </div>
+              ))}
+            </div>
+          )}
           <Field label="PERIOD LABEL">
             <input
               className="input"
@@ -478,11 +646,7 @@ function OverdueTab() {
               <span style={{ fontWeight: 800 }}>{fmtMoney(row.amount)}</span>
             </div>
             <div className="row" style={{ marginTop: 10 }}>
-              <a href={`tel:${row.phone}`}>
-                <Btn variant="ghost" sm>
-                  📞 Call
-                </Btn>
-              </a>
+              <CallButton phone={row.phone} name={row.name} />
               <Btn variant="success" sm onClick={() => markPaid(row)}>
                 ✓ Mark as Paid
               </Btn>

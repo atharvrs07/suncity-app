@@ -5,7 +5,7 @@ const jwt = require('jsonwebtoken');
 const db = require('../db');
 const cfg = require('../config');
 const oauth = require('../lib/oauth');
-const { sign, authRequired } = require('../middleware/auth');
+const { sign, startSession, authRequired } = require('../middleware/auth');
 const { logAudit } = require('../lib/audit');
 const {
   sendPasswordResetEmail,
@@ -15,6 +15,7 @@ const {
 } = require('../lib/mailer');
 const { isValidHouseNo } = require('../lib/houseNumbers');
 const { isDisposableEmail, hasMxRecords } = require('../lib/emailValidation');
+const upload = require('../lib/uploads');
 
 const router = express.Router();
 
@@ -289,7 +290,9 @@ router.post('/verify-signup', (req, res) => {
   logAudit({ actor: user, action: 'resident_signup', targetType: 'user', targetId: user.id, detail: `${user.name} joined` });
   notifyAdminsNewResident(user).catch((err) => console.error('[notify] admin notification failed:', err.message));
 
-  res.status(201).json({ token: sign(user), user });
+  const remember = !!(req.body && req.body.remember);
+  const sid = startSession(user, req);
+  res.status(201).json({ token: sign(user, { remember, sid }), user });
 });
 
 router.post('/resend-otp', (req, res) => {
@@ -480,7 +483,8 @@ async function handleOAuthCallback(req, res) {
       if (user.status !== 'approved') {
         return oauthClientRedirect(res, { error: 'Your account is not active. Contact the society office.' });
       }
-      return oauthClientRedirect(res, { token: sign(user) });
+      logAudit({ actor: user, action: 'login', detail: `${provider} sign-in` });
+      return oauthClientRedirect(res, { token: sign(user, { sid: startSession(user, req) }) });
     }
 
     // Brand-new account — collect the mandatory profile fields first. The signed
@@ -584,11 +588,13 @@ router.post('/oauth/complete', (req, res) => {
   }
 
   notifyAdminsNewResident(user).catch((e) => console.error('[notify] admin notification failed:', e.message));
-  res.status(201).json({ token: sign(user), user });
+  const remember = !!(req.body && req.body.remember);
+  const sid = startSession(user, req);
+  res.status(201).json({ token: sign(user, { remember, sid }), user });
 });
 
 router.post('/login', (req, res) => {
-  const { phone, password } = req.body || {};
+  const { phone, password, remember } = req.body || {};
   const user = db.prepare('SELECT * FROM users WHERE phone = ?').get(normalizePhone(phone));
   if (!user || !bcrypt.compareSync(password || '', user.password_hash)) {
     return res.status(401).json({ error: 'Incorrect phone number or password' });
@@ -600,8 +606,9 @@ router.post('/login', (req, res) => {
     return res.status(403).json({ error: 'Your signup was rejected. Contact the society office.' });
   }
   logAudit({ actor: user, action: 'login', detail: 'phone login' });
+  const sid = startSession(user, req);
   const { password_hash, ...safe } = user;
-  res.json({ token: sign(user), user: safe });
+  res.json({ token: sign(user, { remember: !!remember, sid }), user: safe });
 });
 
 // ---- Office-bearer login (username + password) ----
@@ -629,12 +636,30 @@ router.post('/ob-login', (req, res) => {
   }
   obLimiter.clear(req.ip);
   logAudit({ actor: user, action: 'login', detail: 'committee (username) login' });
+  const sid = startSession(user, req);
   const { password_hash, ...safe } = user;
-  res.json({ token: sign(user), user: safe });
+  res.json({ token: sign(user, { remember: !!(req.body && req.body.remember), sid }), user: safe });
 });
 
 router.get('/me', authRequired, (req, res) => {
   res.json({ user: req.user });
+});
+
+// ---- Session activity (item 17) ----
+// A resident's own recent sessions with durations, plus lightweight aggregates
+// (member since, last login, total logins). Informational only.
+router.get('/sessions', authRequired, (req, res) => {
+  const sessions = db
+    .prepare(
+      `SELECT id, user_agent, started_at, last_seen_at,
+              CAST((julianday(last_seen_at) - julianday(started_at)) * 86400 AS INTEGER) AS duration_seconds
+       FROM user_sessions WHERE user_id = ? ORDER BY started_at DESC LIMIT 10`
+    )
+    .all(req.user.id);
+  const meta = db
+    .prepare('SELECT created_at, last_login_at, last_active_at, login_count FROM users WHERE id = ?')
+    .get(req.user.id);
+  res.json({ sessions, meta });
 });
 
 router.patch('/me', authRequired, (req, res) => {
@@ -654,9 +679,24 @@ router.patch('/me', authRequired, (req, res) => {
     req.user.id
   );
   const user = db
-    .prepare('SELECT id, name, phone, username, email, flat_no, block, house_no, resident_status, role, role_detail, status FROM users WHERE id = ?')
+    .prepare('SELECT id, name, phone, username, email, flat_no, block, house_no, resident_status, role, role_detail, avatar, status FROM users WHERE id = ?')
     .get(req.user.id);
   res.json({ user });
+});
+
+// Profile picture upload (item 16). Visible to everyone in the app — the avatar
+// path is joined into resident/name displays across modules. Reuses the shared
+// image-upload infra (5 MB, images only). Uploading again replaces the picture.
+router.post('/me/avatar', authRequired, upload.single('avatar'), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'Pick an image to upload' });
+  const avatar = `/uploads/${req.file.filename}`;
+  db.prepare('UPDATE users SET avatar = ? WHERE id = ?').run(avatar, req.user.id);
+  res.json({ avatar, message: 'Profile picture updated' });
+});
+
+router.delete('/me/avatar', authRequired, (req, res) => {
+  db.prepare('UPDATE users SET avatar = NULL WHERE id = ?').run(req.user.id);
+  res.json({ message: 'Profile picture removed' });
 });
 
 // ---- Self-service forgot / reset password ----

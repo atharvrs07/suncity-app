@@ -52,7 +52,7 @@ router.get('/', (req, res) => {
   const where = req.user.role === 'super_admin' ? '' : "WHERE role != 'super_admin' ";
   const users = db
     .prepare(
-      `SELECT id, name, phone, username, email, flat_no, block, house_no, resident_status, role, role_detail, permissions, status, created_at
+      `SELECT id, name, phone, username, email, flat_no, block, house_no, resident_status, role, role_detail, permissions, avatar, last_active_at, last_login_at, status, created_at
        FROM users ${where}ORDER BY created_at DESC`
     )
     .all()

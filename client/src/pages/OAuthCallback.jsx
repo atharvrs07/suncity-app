@@ -145,8 +145,9 @@ export default function OAuthCallback() {
               className="input"
               type="tel"
               inputMode="numeric"
+              maxLength={10}
               value={form.phone}
-              onChange={set('phone')}
+              onChange={(e) => setForm((f) => ({ ...f, phone: e.target.value.replace(/\D/g, '').slice(0, 10) }))}
               placeholder="10-digit mobile number"
               required
             />

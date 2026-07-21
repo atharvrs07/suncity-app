@@ -2,6 +2,7 @@ const express = require('express');
 const db = require('../db');
 const { authRequired, hasPermission } = require('../middleware/auth');
 const { logAudit } = require('../lib/audit');
+const { notifyAll } = require('../lib/notify');
 const upload = require('../lib/uploads');
 
 const router = express.Router();
@@ -14,7 +15,7 @@ const canModerate = (user) => hasPermission(user, 'manage_lostfound');
 router.get('/', (req, res) => {
   const items = db
     .prepare(
-      `SELECT l.*, u.name AS poster_name, u.flat_no AS poster_flat
+      `SELECT l.*, u.name AS poster_name, u.flat_no AS poster_flat, u.avatar AS poster_avatar
        FROM lost_found l JOIN users u ON u.id = l.posted_by
        ORDER BY CASE l.status WHEN 'active' THEN 0 ELSE 1 END, l.created_at DESC`
     )
@@ -28,6 +29,11 @@ router.post('/', upload.single('photo'), (req, res) => {
   if (!title || !title.trim()) return res.status(400).json({ error: 'Item name is required' });
   if (!description || !String(description).trim()) return res.status(400).json({ error: 'Description is required' });
   const photo = req.file ? `/uploads/${req.file.filename}` : null;
+  // The contact number is always the poster's own phone (item 3) — the client
+  // field is read-only/auto-filled, and the server pins it here regardless of
+  // what was submitted so it can't be spoofed. (Falls back to any provided value
+  // for the rare account with no phone on file, e.g. a username-based OB.)
+  const contact = req.user.phone || (contact_phone ? String(contact_phone).trim() : null);
   const info = db
     .prepare(
       'INSERT INTO lost_found (type, title, description, location, photo, contact_phone, posted_by) VALUES (?, ?, ?, ?, ?, ?, ?)'
@@ -38,9 +44,16 @@ router.post('/', upload.single('photo'), (req, res) => {
       description ? String(description).trim() : null,
       location ? String(location).trim() : null,
       photo,
-      contact_phone ? String(contact_phone).trim() : req.user.phone,
+      contact,
       req.user.id
     );
+  notifyAll({
+    type: 'lostfound',
+    title: `${type === 'lost' ? 'Lost' : 'Found'}: ${title.trim()}`,
+    body: location ? `Near ${String(location).trim()}` : null,
+    link: '/lost-found',
+    excludeUserId: req.user.id,
+  });
   res.status(201).json({ id: info.lastInsertRowid, message: 'Posted to Lost & Found' });
 });
 

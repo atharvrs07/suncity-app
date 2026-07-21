@@ -47,6 +47,7 @@ export default function Signup() {
     password: '',
   });
   const [otp, setOtp] = useState('');
+  const [remember, setRemember] = useState(false);
   const [error, setError] = useState('');
   const [info, setInfo] = useState('');
   const [busy, setBusy] = useState(false);
@@ -132,7 +133,7 @@ export default function Signup() {
     try {
       const d = await api('/api/auth/verify-signup', {
         method: 'POST',
-        body: { email: form.email, otp },
+        body: { email: form.email, otp, remember },
       });
       completeSignup(d.token, d.user);
       navigate('/', { replace: true });
@@ -356,8 +357,9 @@ export default function Signup() {
                     className="input"
                     type="tel"
                     inputMode="numeric"
+                    maxLength={10}
                     value={form.phone}
-                    onChange={set('phone')}
+                    onChange={(e) => setForm((f) => ({ ...f, phone: e.target.value.replace(/\D/g, '').slice(0, 10) }))}
                     placeholder="10-digit mobile number"
                     required
                   />
@@ -371,6 +373,12 @@ export default function Signup() {
                     required
                   />
                 </Field>
+                {isResident && (
+                  <label className="row" style={{ gap: 7, cursor: 'pointer', fontSize: 13.5, fontWeight: 600, marginBottom: 13 }}>
+                    <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
+                    Stay logged in on this device
+                  </label>
+                )}
                 <Btn block disabled={busy} type="submit">
                   {busy ? (isResident ? 'Sending code…' : 'Submitting…') : isResident ? 'Sign Up' : 'Submit for approval'}
                 </Btn>

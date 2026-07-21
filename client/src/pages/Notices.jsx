@@ -3,6 +3,7 @@ import { api, fmtDateTime } from '../api';
 import { useFetch } from '../hooks';
 import { useAuth } from '../auth';
 import { GlassCard, Btn, Chip, Field, Toggle, Sheet, Empty, Spinner, StaggerList, StaggerItem } from '../components/Glass';
+import Avatar from '../components/Avatar';
 import { NOTICE_CATEGORIES, roleLabel } from '../constants';
 
 export default function Notices() {
@@ -85,7 +86,8 @@ export default function Notices() {
                   </div>
                   <p style={{ marginTop: 8, fontSize: 14.5, lineHeight: 1.55, whiteSpace: 'pre-wrap' }}>{n.body}</p>
                   <div className="row-between" style={{ marginTop: 10 }}>
-                    <span className="tiny">
+                    <span className="tiny row" style={{ gap: 6 }}>
+                      <Avatar name={n.poster_name} src={n.poster_avatar} size="xs" />
                       {n.poster_name} ({roleLabel({ role: n.poster_role, role_detail: n.poster_role_detail })}) ·{' '}
                       {fmtDateTime(n.created_at)}
                     </span>

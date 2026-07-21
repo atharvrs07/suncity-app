@@ -3,6 +3,8 @@ import { api, fmtDateTime } from '../api';
 import { useFetch } from '../hooks';
 import { useAuth } from '../auth';
 import { GlassCard, Btn, Chip, Field, Sheet, Segmented, Empty, Spinner, StaggerList, StaggerItem } from '../components/Glass';
+import Avatar from '../components/Avatar';
+import { hasPerm } from '../constants';
 
 const FILTERS = [
   { value: 'all', label: 'All' },
@@ -15,7 +17,7 @@ export default function LostFound() {
   const { data, loading, reload } = useFetch('/api/lostfound');
   const [filter, setFilter] = useState('all');
   const [showNew, setShowNew] = useState(false);
-  const [form, setForm] = useState({ type: 'lost', title: '', description: '', location: '', contact_phone: '', photo: null });
+  const [form, setForm] = useState({ type: 'lost', title: '', description: '', location: '', photo: null });
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -27,11 +29,13 @@ export default function LostFound() {
     setError('');
     try {
       const fd = new FormData();
-      for (const k of ['type', 'title', 'description', 'location', 'contact_phone']) fd.append(k, form[k]);
+      // Contact phone is intentionally NOT sent — the server pins it to the
+      // poster's own number (item 3); the field below is read-only.
+      for (const k of ['type', 'title', 'description', 'location']) fd.append(k, form[k]);
       if (form.photo) fd.append('photo', form.photo);
       await api('/api/lostfound', { method: 'POST', form: fd });
       setShowNew(false);
-      setForm({ type: 'lost', title: '', description: '', location: '', contact_phone: '', photo: null });
+      setForm({ type: 'lost', title: '', description: '', location: '', photo: null });
       reload();
     } catch (err) {
       setError(err.message);
@@ -80,7 +84,7 @@ export default function LostFound() {
 
       <StaggerList>
         {items.map((item) => {
-          const canManage = user.role === 'admin' || item.posted_by === user.id;
+          const canManage = hasPerm(user, 'manage_lostfound') || item.posted_by === user.id;
           return (
             <StaggerItem key={item.id}>
               <GlassCard style={{ opacity: item.status === 'resolved' ? 0.55 : 1 }}>
@@ -102,7 +106,8 @@ export default function LostFound() {
                   {item.contact_phone && <a href={`tel:${item.contact_phone}`}>📞 {item.contact_phone}</a>}
                 </p>
                 <div className="row-between" style={{ marginTop: 8 }}>
-                  <span className="tiny">
+                  <span className="tiny row" style={{ gap: 6 }}>
+                    <Avatar name={item.poster_name} src={item.poster_avatar} size="xs" />
                     {item.poster_name}
                     {item.poster_flat ? ` (${item.poster_flat})` : ''} · {fmtDateTime(item.created_at)}
                   </span>
@@ -173,14 +178,17 @@ export default function LostFound() {
               placeholder="Where was it lost/found?"
             />
           </Field>
-          <Field label="CONTACT PHONE (DEFAULTS TO YOURS)">
+          <Field label="CONTACT PHONE">
+            {/* Read-only & auto-filled with the poster's own number (item 3). */}
             <input
               className="input"
               type="tel"
-              value={form.contact_phone}
-              onChange={(e) => setForm((f) => ({ ...f, contact_phone: e.target.value }))}
-              placeholder="Leave blank to use your number"
+              value={user.phone || 'No phone on file'}
+              readOnly
+              disabled
+              style={{ opacity: 0.7 }}
             />
+            <span className="tiny" style={{ marginTop: 4 }}>Your registered number is shared so others can reach you.</span>
           </Field>
           <Btn block disabled={busy} type="submit">
             {busy ? 'Posting…' : 'Post'}

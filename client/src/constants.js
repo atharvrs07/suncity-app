@@ -1,19 +1,26 @@
+// The full historical category list — kept complete so complaints already filed
+// under a retired category (marked `removed`) still show a proper label. New
+// complaints are filed only from COMPLAINT_CATEGORY_OPTIONS below. Mirrors
+// server/config.js COMPLAINT_CATEGORIES / REMOVED_COMPLAINT_CATEGORIES.
 export const COMPLAINT_CATEGORIES = [
   { value: 'street_light', label: 'Street Light', emoji: '💡' },
-  { value: 'security', label: 'Security', emoji: '🛡️' },
+  { value: 'security', label: 'Security', emoji: '🛡️', removed: true },
   { value: 'grass_cutting', label: 'Grass Cutting', emoji: '🌿' },
   { value: 'park_cleaning', label: 'Park Cleaning', emoji: '🏞️' },
   { value: 'drainage_cleaning', label: 'Drainage Cleaning', emoji: '🚰' },
   { value: 'road_garbage_pickup', label: 'Road Garbage Pickup', emoji: '🗑️' },
-  { value: 'plumbing', label: 'Plumbing', emoji: '🔧' },
+  { value: 'plumbing', label: 'Plumbing', emoji: '🔧', removed: true },
   { value: 'electrical', label: 'Electrical', emoji: '⚡' },
-  { value: 'housekeeping', label: 'Housekeeping', emoji: '🧹' },
-  { value: 'parking', label: 'Parking', emoji: '🚗' },
+  { value: 'housekeeping', label: 'Housekeeping', emoji: '🧹', removed: true },
+  { value: 'parking', label: 'Parking', emoji: '🚗', removed: true },
   { value: 'lift', label: 'Lift', emoji: '🛗' },
   { value: 'structural', label: 'Structural', emoji: '🏗️' },
   { value: 'pest_control', label: 'Pest Control', emoji: '🐜' },
   { value: 'other', label: 'Other', emoji: '📝' },
 ];
+
+// Only these may be picked on the complaint form (retired ones are excluded).
+export const COMPLAINT_CATEGORY_OPTIONS = COMPLAINT_CATEGORIES.filter((c) => !c.removed);
 
 export const catMeta = (value) =>
   COMPLAINT_CATEGORIES.find((c) => c.value === value) || { value, label: value, emoji: '📋' };
@@ -148,18 +155,21 @@ export function roleLabel(user) {
 
 // Menu items may gate on `roles` (any of) or `perm` (an office-bearer permission,
 // which admins/super admin always satisfy). No gate → visible to everyone.
+// `labelKey` maps to an i18n key (client/src/i18n.js); `label` is the English
+// fallback used if a translation is missing. The Admin area is labelled
+// "Control Panel" in the UI (item 12) — the route/role names are unchanged.
 export const MENU = [
-  { path: '/', label: 'Home', emoji: '🏠' },
-  { path: '/complaints', label: 'Complaints', emoji: '📋' },
-  { path: '/dues', label: 'Dues', emoji: '💳' },
-  { path: '/notices', label: 'Notices', emoji: '📢' },
-  { path: '/classifieds', label: 'Classifieds', emoji: '🏷️', perm: 'manage_classifieds' },
-  { path: '/approvals', label: 'Approvals', emoji: '✅', roles: ['admin', 'super_admin'] },
-  { path: '/admin', label: 'Admin', emoji: '⚙️', roles: ['admin', 'super_admin'] },
-  { path: '/lost-found', label: 'Lost & Found', emoji: '🔍' },
-  { path: '/events', label: 'Society Events', emoji: '🎉' },
-  { path: '/gallery', label: 'Photo Gallery', emoji: '🖼️' },
-  { path: '/settings', label: 'Settings', emoji: '👤' },
+  { path: '/', label: 'Home', labelKey: 'nav.home', emoji: '🏠' },
+  { path: '/complaints', label: 'Complaints', labelKey: 'nav.complaints', emoji: '📋' },
+  { path: '/dues', label: 'Dues', labelKey: 'nav.dues', emoji: '💳' },
+  { path: '/notices', label: 'Notices', labelKey: 'nav.notices', emoji: '📢' },
+  { path: '/classifieds', label: 'Classifieds', labelKey: 'nav.classifieds', emoji: '🏷️', perm: 'manage_classifieds' },
+  { path: '/approvals', label: 'Approvals', labelKey: 'nav.approvals', emoji: '✅', roles: ['admin', 'super_admin'] },
+  { path: '/admin', label: 'Control Panel', labelKey: 'nav.controlPanel', emoji: '⚙️', roles: ['admin', 'super_admin'] },
+  { path: '/lost-found', label: 'Lost & Found', labelKey: 'nav.lostFound', emoji: '🔍' },
+  { path: '/events', label: 'Society Events', labelKey: 'nav.events', emoji: '🎉' },
+  { path: '/gallery', label: 'Photo Gallery', labelKey: 'nav.gallery', emoji: '🖼️' },
+  { path: '/settings', label: 'Settings', labelKey: 'nav.settings', emoji: '👤' },
 ];
 
 export function menuFor(user) {

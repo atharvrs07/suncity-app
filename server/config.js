@@ -49,6 +49,10 @@ const SUPERVISOR_ROLES = ['maintenance', 'cleaning'];
 // list with display labels; keep the two in sync.
 const RESIDENT_STATUSES = ['owner', 'resident'];
 
+// The canonical list of every complaint category the app has ever used. This
+// stays complete so that complaints already filed under a now-retired category
+// still render with a proper label (see catMeta on the client). New complaints
+// may only be filed under COMPLAINT_CATEGORY_OPTIONS below.
 const COMPLAINT_CATEGORIES = [
   'street_light',
   'security',
@@ -66,7 +70,19 @@ const COMPLAINT_CATEGORIES = [
   'other',
 ];
 
-// Cleaning supervisor scope: road / drainage / park cleaning.
+// Categories retired from the complaint submission form. They remain in
+// COMPLAINT_CATEGORIES so historical complaints keep their labels, but the API
+// rejects NEW complaints filed under them and the UI no longer offers them.
+const REMOVED_COMPLAINT_CATEGORIES = ['parking', 'housekeeping', 'plumbing', 'security'];
+
+// The categories a resident may actually choose when filing a new complaint.
+const COMPLAINT_CATEGORY_OPTIONS = COMPLAINT_CATEGORIES.filter(
+  (c) => !REMOVED_COMPLAINT_CATEGORIES.includes(c)
+);
+
+// Cleaning supervisor scope: road / drainage / park cleaning. Everything else
+// routes to the maintenance supervisor. Used both for category visibility and
+// to stamp complaints.assigned_role on creation (see routes/complaints.js).
 const CLEANING_CATEGORIES = ['park_cleaning', 'drainage_cleaning', 'road_garbage_pickup'];
 
 const NOTICE_CATEGORIES = ['general', 'maintenance', 'event', 'emergency'];
@@ -127,6 +143,13 @@ module.exports = {
   },
   UPI_VPA: process.env.SOCIETY_UPI_VPA || 'society@upi',
   UPI_PAYEE: process.env.SOCIETY_UPI_PAYEE_NAME || 'My Suncity Vistaar',
+  // Google Gemini — powers the AI-assisted payment-screenshot check (item 22) and
+  // is exposed as a reusable service in server/lib/gemini.js. Blank key → the
+  // integration reports "not configured" and AI checks are skipped gracefully.
+  GEMINI: {
+    apiKey: process.env.GEMINI_API_KEY || '',
+    model: process.env.GEMINI_MODEL || 'gemini-2.0-flash',
+  },
   ADMIN_SEED: {
     name: process.env.ADMIN_SEED_NAME || 'Society Admin',
     phone: process.env.ADMIN_SEED_PHONE || '9999999999',
@@ -147,6 +170,8 @@ module.exports = {
   SUPERVISOR_ROLES,
   RESIDENT_STATUSES,
   COMPLAINT_CATEGORIES,
+  REMOVED_COMPLAINT_CATEGORIES,
+  COMPLAINT_CATEGORY_OPTIONS,
   CLEANING_CATEGORIES,
   NOTICE_CATEGORIES,
   COMPLAINT_STATUSES,

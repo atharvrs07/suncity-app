@@ -26,6 +26,10 @@ CREATE TABLE IF NOT EXISTS users (
   approved_by INTEGER,
   oauth_provider TEXT,
   oauth_sub TEXT,
+  avatar TEXT,
+  last_active_at TEXT,
+  last_login_at TEXT,
+  login_count INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -36,6 +40,7 @@ CREATE TABLE IF NOT EXISTS complaints (
   title TEXT NOT NULL,
   description TEXT NOT NULL,
   photo TEXT,
+  assigned_role TEXT,
   status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','in_progress','resolved','closed')),
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT
@@ -56,6 +61,7 @@ CREATE TABLE IF NOT EXISTS due_automations (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
   amount REAL NOT NULL,
+  block_amounts TEXT,
   trigger_day INTEGER NOT NULL CHECK (trigger_day BETWEEN 1 AND 31),
   window_days INTEGER NOT NULL DEFAULT 10 CHECK (window_days BETWEEN 1 AND 90),
   active INTEGER NOT NULL DEFAULT 1,
@@ -82,6 +88,15 @@ CREATE TABLE IF NOT EXISTS payments (
   due_id INTEGER NOT NULL REFERENCES dues(id),
   user_id INTEGER NOT NULL REFERENCES users(id),
   utr_reference TEXT NOT NULL,
+  screenshot TEXT,
+  txn_id TEXT,
+  txn_datetime TEXT,
+  amount_detected TEXT,
+  ai_verdict TEXT,
+  ai_reason TEXT,
+  ai_checked_at TEXT,
+  provisional_receipt_at TEXT,
+  receipt_at TEXT,
   status TEXT NOT NULL DEFAULT 'submitted' CHECK (status IN ('submitted','verified','rejected')),
   reviewed_by INTEGER,
   reviewed_at TEXT,
@@ -138,6 +153,7 @@ CREATE TABLE IF NOT EXISTS gallery_photos (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   photo TEXT NOT NULL,
   caption TEXT,
+  source_event_id INTEGER,
   uploaded_by INTEGER NOT NULL REFERENCES users(id),
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -190,6 +206,42 @@ CREATE TABLE IF NOT EXISTS audit_log (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log (created_at DESC);
+
+-- In-app notifications. Every "post" in the app (notice, complaint update,
+-- lost & found, event, payment status, etc.) fans out one row per recipient so
+-- the navbar bell can show an unread count and a per-user history. (True OS-level
+-- Web Push can be layered on later — see server/lib/notify.js.)
+CREATE TABLE IF NOT EXISTS notifications (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  type TEXT NOT NULL DEFAULT 'general',
+  title TEXT NOT NULL,
+  body TEXT,
+  link TEXT,
+  read INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications (user_id, read, created_at DESC);
+
+-- Simple admin-settable key/value store (payment VPA, QR image, payee name, …).
+-- Seeded from env defaults on boot; the Control Panel can override any value.
+CREATE TABLE IF NOT EXISTS app_settings (
+  key TEXT PRIMARY KEY,
+  value TEXT,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Lightweight session activity (item 17). One row per login; last_seen_at is
+-- bumped (throttled) on each authenticated request whose JWT carries this row's
+-- id, giving a "recent sessions + duration" view without a full analytics stack.
+CREATE TABLE IF NOT EXISTS user_sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  user_agent TEXT,
+  started_at TEXT NOT NULL DEFAULT (datetime('now')),
+  last_seen_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON user_sessions (user_id, last_seen_at DESC);
 `);
 
 // Migration for DBs created before office-bearer username login existed:
@@ -372,6 +424,48 @@ function migrateResidentStatus() {
   );
 }
 migrateResidentStatus();
+
+// Migration for DBs created before the 2026-07 feature batch: profile pictures +
+// session-activity columns on users, complaint routing, per-block due amounts,
+// and the AI payment-verification columns on payments. All plain nullable
+// columns, so guarded ADD COLUMNs suffice (the new tables — notifications,
+// app_settings, user_sessions — come from CREATE TABLE IF NOT EXISTS above).
+function migrateFeatureBatch2026() {
+  const add = (table, col, decl) => {
+    const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+    if (!cols.includes(col)) {
+      console.log(`[migrate] Adding ${table}.${col} column…`);
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${decl}`);
+    }
+  };
+  add('users', 'avatar', 'avatar TEXT');
+  add('users', 'last_active_at', 'last_active_at TEXT');
+  add('users', 'last_login_at', 'last_login_at TEXT');
+  add('users', 'login_count', 'login_count INTEGER NOT NULL DEFAULT 0');
+  add('complaints', 'assigned_role', 'assigned_role TEXT');
+  add('gallery_photos', 'source_event_id', 'source_event_id INTEGER');
+  add('due_automations', 'block_amounts', 'block_amounts TEXT');
+  add('payments', 'screenshot', 'screenshot TEXT');
+  add('payments', 'txn_id', 'txn_id TEXT');
+  add('payments', 'txn_datetime', 'txn_datetime TEXT');
+  add('payments', 'amount_detected', 'amount_detected TEXT');
+  add('payments', 'ai_verdict', 'ai_verdict TEXT');
+  add('payments', 'ai_reason', 'ai_reason TEXT');
+  add('payments', 'ai_checked_at', 'ai_checked_at TEXT');
+  add('payments', 'provisional_receipt_at', 'provisional_receipt_at TEXT');
+  add('payments', 'receipt_at', 'receipt_at TEXT');
+}
+migrateFeatureBatch2026();
+
+// Seed default app settings from env (idempotent — never overwrites a value the
+// Control Panel later changed). Payment VPA/payee default from the UPI env vars.
+function seedSettings() {
+  const upsert = db.prepare('INSERT OR IGNORE INTO app_settings (key, value) VALUES (?, ?)');
+  upsert.run('upi_vpa', cfg.UPI_VPA);
+  upsert.run('upi_payee', cfg.UPI_PAYEE);
+  upsert.run('payment_qr_image', ''); // admin uploads the provided QR here later
+}
+seedSettings();
 
 // The approval chain must never get stuck with zero admins: whenever no
 // approved admin exists, create (or promote) the fallback admin from env.

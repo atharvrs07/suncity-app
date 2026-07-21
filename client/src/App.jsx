@@ -2,9 +2,11 @@ import { useState } from 'react';
 import { AnimatePresence } from 'framer-motion';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './auth';
+import { ThemeProvider } from './theme';
 import Layout from './components/Layout';
 import SplashScreen from './components/SplashScreen';
 import Watermark from './components/Watermark';
+import BrandStrip from './components/BrandStrip';
 import { Spinner } from './components/Glass';
 import Login from './pages/Login';
 import OBLogin from './pages/OBLogin';
@@ -55,10 +57,12 @@ function SplashGate({ children }) {
 
 export default function App() {
   return (
-    <SplashGate>
-      <AuthProvider>
-        <Watermark />
-        <BrowserRouter>
+    <ThemeProvider>
+      <SplashGate>
+        <AuthProvider>
+          <BrandStrip />
+          <Watermark />
+          <BrowserRouter>
         <Routes>
           <Route path="/login" element={<Login />} />
           <Route path="/ob/login" element={<OBLogin />} />
@@ -109,7 +113,8 @@ export default function App() {
             </Route>
           </Routes>
         </BrowserRouter>
-      </AuthProvider>
-    </SplashGate>
+        </AuthProvider>
+      </SplashGate>
+    </ThemeProvider>
   );
 }
