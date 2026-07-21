@@ -43,6 +43,12 @@ const OFFICE_BEARER_ROLES = [
 
 const SUPERVISOR_ROLES = ['maintenance', 'cleaning'];
 
+// A resident account is either the flat's Owner or its (living-in) Resident.
+// A house may hold at most one of each — see the (block, house_no,
+// resident_status) unique index in db.js. client/src/constants.js mirrors this
+// list with display labels; keep the two in sync.
+const RESIDENT_STATUSES = ['owner', 'resident'];
+
 const COMPLAINT_CATEGORIES = [
   'street_light',
   'security',
@@ -139,6 +145,7 @@ module.exports = {
   OFFICE_BEARER_PERMISSIONS,
   OFFICE_BEARER_ROLES,
   SUPERVISOR_ROLES,
+  RESIDENT_STATUSES,
   COMPLAINT_CATEGORIES,
   CLEANING_CATEGORIES,
   NOTICE_CATEGORIES,

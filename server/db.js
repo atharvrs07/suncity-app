@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS users (
   flat_no TEXT,
   block TEXT,
   house_no TEXT,
+  resident_status TEXT,
   role TEXT NOT NULL CHECK (role IN ('super_admin','admin','office_bearer','supervisor','resident')),
   role_detail TEXT,
   permissions TEXT,
@@ -163,6 +164,7 @@ CREATE TABLE IF NOT EXISTS signup_otps (
   flat_no TEXT,
   block TEXT,
   house_no TEXT,
+  resident_status TEXT,
   password_hash TEXT NOT NULL,
   code_hash TEXT NOT NULL,
   expires_at TEXT NOT NULL,
@@ -342,6 +344,34 @@ function migrateSuperAdminAndPermissions() {
   console.log('[migrate] users table rebuilt with super_admin role + permissions.');
 }
 migrateSuperAdminAndPermissions();
+
+// Migration for DBs created before the Owner/Resident status + one-account-per-
+// house-slot lock existed. resident_status is a plain nullable column on both
+// the users table and the pending-signup table, so guarded ADD COLUMNs suffice.
+// The partial unique index enforces the lock: a given (block, house_no) can hold
+// at most one 'owner' resident and one 'resident' resident. NULLs are distinct in
+// SQLite indexes, so legacy residents without a status never collide, and the
+// index only applies to role='resident' rows (promoting a resident away frees the
+// slot automatically). Must run AFTER the super_admin rebuild above, which copies
+// an explicit column list that predates resident_status.
+function migrateResidentStatus() {
+  const userCols = db.prepare('PRAGMA table_info(users)').all().map((c) => c.name);
+  if (!userCols.includes('resident_status')) {
+    console.log('[migrate] Adding users.resident_status column…');
+    db.exec('ALTER TABLE users ADD COLUMN resident_status TEXT');
+  }
+  const otpCols = db.prepare('PRAGMA table_info(signup_otps)').all().map((c) => c.name);
+  if (!otpCols.includes('resident_status')) {
+    console.log('[migrate] Adding signup_otps.resident_status column…');
+    db.exec('ALTER TABLE signup_otps ADD COLUMN resident_status TEXT');
+  }
+  db.exec(
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_users_house_slot
+       ON users (block, house_no, resident_status)
+       WHERE role = 'resident' AND resident_status IS NOT NULL AND block IS NOT NULL AND house_no IS NOT NULL`
+  );
+}
+migrateResidentStatus();
 
 // The approval chain must never get stuck with zero admins: whenever no
 // approved admin exists, create (or promote) the fallback admin from env.

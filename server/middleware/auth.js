@@ -45,7 +45,7 @@ function authRequired(req, res, next) {
   }
   const user = db
     .prepare(
-      'SELECT id, name, phone, username, email, flat_no, block, house_no, role, role_detail, permissions, status FROM users WHERE id = ?'
+      'SELECT id, name, phone, username, email, flat_no, block, house_no, resident_status, role, role_detail, permissions, status FROM users WHERE id = ?'
     )
     .get(payload.id);
   if (!user || user.status !== 'approved') {

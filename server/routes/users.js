@@ -52,7 +52,7 @@ router.get('/', (req, res) => {
   const where = req.user.role === 'super_admin' ? '' : "WHERE role != 'super_admin' ";
   const users = db
     .prepare(
-      `SELECT id, name, phone, username, email, flat_no, block, house_no, role, role_detail, permissions, status, created_at
+      `SELECT id, name, phone, username, email, flat_no, block, house_no, resident_status, role, role_detail, permissions, status, created_at
        FROM users ${where}ORDER BY created_at DESC`
     )
     .all()
@@ -95,7 +95,7 @@ router.patch('/:id', (req, res) => {
   const target = getManageableTarget(req, res);
   if (!target) return;
 
-  const { name, phone, email, block, house_no, password, role, role_detail, permissions } = req.body || {};
+  const { name, phone, email, block, house_no, resident_status, password, role, role_detail, permissions } = req.body || {};
   const updates = {};
 
   if (name !== undefined) {
@@ -124,10 +124,14 @@ router.patch('/:id', (req, res) => {
     updates.email = clean;
   }
 
-  // Block and house number move together and must stay a valid pair; changing
-  // either one re-validates against block-house-numbers.json. flat_no mirrors
-  // house_no so the app's existing flat displays keep working.
-  if (block !== undefined || house_no !== undefined) {
+  // Block, house number and Owner/Resident status move together for a resident
+  // and must stay a valid pair; changing any one re-validates against
+  // block-house-numbers.json. flat_no mirrors house_no so the app's existing flat
+  // displays keep working. When the (post-edit) account is a resident and a status
+  // is present, the house slot is re-checked so an admin can't put two of the same
+  // status in one house (the unique index is the atomic backstop either way);
+  // the account's own current slot is excluded so an unchanged re-save passes.
+  if (block !== undefined || house_no !== undefined || resident_status !== undefined) {
     const nextBlock = normalizeBlock(block !== undefined ? block : target.block);
     const nextHouse = String((house_no !== undefined ? house_no : target.house_no) || '').trim();
     if (!nextBlock) return res.status(400).json({ error: 'Select a valid block' });
@@ -138,6 +142,26 @@ router.patch('/:id', (req, res) => {
     updates.block = nextBlock;
     updates.house_no = nextHouse;
     updates.flat_no = nextHouse;
+
+    if (resident_status !== undefined) {
+      const s = String(resident_status || '').trim().toLowerCase();
+      if (s && !cfg.RESIDENT_STATUSES.includes(s)) return res.status(400).json({ error: 'Choose Owner or Resident' });
+      updates.resident_status = s || null;
+    }
+    const nextStatus = updates.resident_status !== undefined ? updates.resident_status : target.resident_status;
+    const willBeResident = (role !== undefined ? role : target.role) === 'resident';
+    if (willBeResident && nextStatus) {
+      const clash = db
+        .prepare(
+          "SELECT id FROM users WHERE role = 'resident' AND block = ? AND house_no = ? AND resident_status = ? AND id != ?"
+        )
+        .get(nextBlock, nextHouse, nextStatus, target.id);
+      if (clash) {
+        return res.status(409).json({
+          error: `The ${nextStatus === 'owner' ? 'Owner' : 'Resident'} for ${nextBlock} ${nextHouse} is already registered.`,
+        });
+      }
+    }
   }
 
   // Role change (demote / promote). super_admin can never be assigned here, and
@@ -211,7 +235,7 @@ router.patch('/:id', (req, res) => {
     detail: `${target.name} — changed: ${changed.join(', ')}`,
   });
   const user = db
-    .prepare('SELECT id, name, phone, username, email, flat_no, block, house_no, role, role_detail, permissions, status, created_at FROM users WHERE id = ?')
+    .prepare('SELECT id, name, phone, username, email, flat_no, block, house_no, resident_status, role, role_detail, permissions, status, created_at FROM users WHERE id = ?')
     .get(target.id);
   user.permissions = user.permissions ? safeParse(user.permissions) : [];
   res.json({ user, message: 'Account updated' });

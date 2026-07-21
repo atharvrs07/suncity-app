@@ -37,6 +37,29 @@ function normalizeBlock(block) {
   return cfg.BLOCKS.includes(b) ? b : null;
 }
 
+// A resident is either the flat's 'owner' or its (living-in) 'resident'. Returns
+// the normalized value or null if it isn't one of the two allowed statuses.
+function normalizeResidentStatus(status) {
+  const s = String(status || '').trim().toLowerCase();
+  return cfg.RESIDENT_STATUSES.includes(s) ? s : null;
+}
+
+// Is the Owner/Resident slot for this house already registered? A house holds at
+// most one owner + one resident, so we check the specific (block, house, status)
+// slot. The DB unique index (idx_users_house_slot) is the atomic backstop against
+// races; this gives a friendly error before the insert. `excludeId` lets an admin
+// edit re-save a resident's own unchanged slot.
+function houseSlotTaken(block, houseNo, status, excludeId) {
+  const row = db
+    .prepare(
+      `SELECT id FROM users WHERE role = 'resident' AND block = ? AND house_no = ? AND resident_status = ?${
+        excludeId ? ' AND id != ?' : ''
+      }`
+    )
+    .get(...(excludeId ? [block, houseNo, status, excludeId] : [block, houseNo, status]));
+  return !!row;
+}
+
 // Simple in-memory per-IP rate limiter (resets on server restart) — shared by
 // the OB login and forgot-password endpoints.
 function makeRateLimiter(maxAttempts, windowMs) {
@@ -99,21 +122,29 @@ router.post('/signup', async (req, res) => {
   if (signupLimiter.limited(req.ip)) {
     return res.status(429).json({ error: 'Too many signup attempts. Try again in a few minutes.' });
   }
-  const { name, phone, email, password, block, house_no } = req.body || {};
+  const { name, phone, email, password, block, house_no, resident_status } = req.body || {};
   const cleanName = String(name || '').trim();
   const cleanPhone = normalizePhone(phone);
   const cleanEmail = normalizeEmail(email);
   const cleanBlock = normalizeBlock(block);
   const cleanHouseNo = String(house_no || '').trim();
+  const cleanStatus = normalizeResidentStatus(resident_status);
   // Every field on the resident signup form is mandatory (the staged reveal on
   // the client is presentation only — all fields are still required here).
   if (!cleanName) return res.status(400).json({ error: 'Name is required' });
+  if (!cleanStatus) return res.status(400).json({ error: 'Select whether you are the Owner or a Resident' });
   if (!cleanBlock) return res.status(400).json({ error: 'Select your block' });
   if (!cleanHouseNo) return res.status(400).json({ error: 'Select your house number' });
   // The house number must belong to the chosen block (source of truth is
   // block-house-numbers.json, shared with the client).
   if (!isValidHouseNo(cleanBlock, cleanHouseNo)) {
     return res.status(400).json({ error: 'Select a house number that belongs to your block' });
+  }
+  // One Owner + one Resident per house — reject if this house's slot is taken.
+  if (houseSlotTaken(cleanBlock, cleanHouseNo, cleanStatus)) {
+    return res.status(409).json({
+      error: `The ${cleanStatus === 'owner' ? 'Owner' : 'Resident'} for ${cleanBlock} ${cleanHouseNo} is already registered.`,
+    });
   }
   if (!cleanEmail || !EMAIL_RE.test(cleanEmail)) return res.status(400).json({ error: 'Enter a valid email address' });
   if (cleanPhone.length !== 10) return res.status(400).json({ error: 'Enter a valid 10-digit phone number' });
@@ -157,8 +188,8 @@ router.post('/signup', async (req, res) => {
     // A fresh signup for this email replaces any earlier in-flight one.
     db.prepare('DELETE FROM signup_otps WHERE email = ?').run(cleanEmail);
     db.prepare(
-      `INSERT INTO signup_otps (email, name, phone, flat_no, block, house_no, password_hash, code_hash, expires_at, last_sent_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO signup_otps (email, name, phone, flat_no, block, house_no, resident_status, password_hash, code_hash, expires_at, last_sent_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       cleanEmail,
       cleanName,
@@ -166,6 +197,7 @@ router.post('/signup', async (req, res) => {
       cleanHouseNo, // flat_no mirrors the structured house number so existing displays keep working
       cleanBlock,
       cleanHouseNo,
+      cleanStatus,
       bcrypt.hashSync(password, 10),
       hashOtp(code),
       new Date(now + OTP_TTL_MS).toISOString(),
@@ -232,14 +264,22 @@ router.post('/verify-signup', (req, res) => {
         e.status = 409;
         throw e;
       }
+      // The house slot may have been claimed while the code sat unverified.
+      if (row.resident_status && houseSlotTaken(row.block, row.house_no, row.resident_status)) {
+        const e = new Error(
+          `The ${row.resident_status === 'owner' ? 'Owner' : 'Resident'} for ${row.block} ${row.house_no} is already registered.`
+        );
+        e.status = 409;
+        throw e;
+      }
       const info = db
         .prepare(
-          "INSERT INTO users (name, phone, email, password_hash, flat_no, block, house_no, role, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'resident', 'approved')"
+          "INSERT INTO users (name, phone, email, password_hash, flat_no, block, house_no, resident_status, role, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'resident', 'approved')"
         )
-        .run(row.name, row.phone, row.email, row.password_hash, row.flat_no, row.block, row.house_no);
+        .run(row.name, row.phone, row.email, row.password_hash, row.flat_no, row.block, row.house_no, row.resident_status);
       db.prepare('DELETE FROM signup_otps WHERE email = ?').run(row.email);
       return db
-        .prepare('SELECT id, name, phone, username, email, flat_no, block, house_no, role, role_detail, status FROM users WHERE id = ?')
+        .prepare('SELECT id, name, phone, username, email, flat_no, block, house_no, resident_status, role, role_detail, status FROM users WHERE id = ?')
         .get(info.lastInsertRowid);
     })();
   } catch (err) {
@@ -470,7 +510,7 @@ router.post('/oauth/:provider/callback', express.urlencoded({ extended: false })
 // via the provider); they can set one later via "forgot password" if they want
 // phone login too.
 router.post('/oauth/complete', (req, res) => {
-  const { pending_token, name, phone, block, house_no } = req.body || {};
+  const { pending_token, name, phone, block, house_no, resident_status } = req.body || {};
   let claims;
   try {
     claims = jwt.verify(String(pending_token || ''), cfg.JWT_SECRET);
@@ -485,13 +525,20 @@ router.post('/oauth/complete', (req, res) => {
   const cleanPhone = normalizePhone(phone);
   const cleanBlock = normalizeBlock(block);
   const cleanHouseNo = String(house_no || '').trim();
+  const cleanStatus = normalizeResidentStatus(resident_status);
   const cleanEmail = normalizeEmail(claims.email);
   if (!cleanName) return res.status(400).json({ error: 'Name is required' });
   if (cleanPhone.length !== 10) return res.status(400).json({ error: 'Enter a valid 10-digit phone number' });
+  if (!cleanStatus) return res.status(400).json({ error: 'Select whether you are the Owner or a Resident' });
   if (!cleanBlock) return res.status(400).json({ error: 'Select your block' });
   if (!cleanHouseNo) return res.status(400).json({ error: 'Select your house number' });
   if (!isValidHouseNo(cleanBlock, cleanHouseNo)) {
     return res.status(400).json({ error: 'Select a house number that belongs to your block' });
+  }
+  if (houseSlotTaken(cleanBlock, cleanHouseNo, cleanStatus)) {
+    return res.status(409).json({
+      error: `The ${cleanStatus === 'owner' ? 'Owner' : 'Resident'} for ${cleanBlock} ${cleanHouseNo} is already registered.`,
+    });
   }
   if (!cleanEmail) return res.status(400).json({ error: 'Missing email from sign-in. Please start again.' });
 
@@ -513,15 +560,23 @@ router.post('/oauth/complete', (req, res) => {
         e.status = 409;
         throw e;
       }
+      // The house slot may have been claimed while the profile step was open.
+      if (houseSlotTaken(cleanBlock, cleanHouseNo, cleanStatus)) {
+        const e = new Error(
+          `The ${cleanStatus === 'owner' ? 'Owner' : 'Resident'} for ${cleanBlock} ${cleanHouseNo} is already registered.`
+        );
+        e.status = 409;
+        throw e;
+      }
       const placeholderPassword = bcrypt.hashSync(crypto.randomBytes(24).toString('hex'), 10);
       const info = db
         .prepare(
-          `INSERT INTO users (name, phone, email, password_hash, flat_no, block, house_no, role, status, oauth_provider, oauth_sub)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'resident', 'approved', ?, ?)`
+          `INSERT INTO users (name, phone, email, password_hash, flat_no, block, house_no, resident_status, role, status, oauth_provider, oauth_sub)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'resident', 'approved', ?, ?)`
         )
-        .run(cleanName, cleanPhone, cleanEmail, placeholderPassword, cleanHouseNo, cleanBlock, cleanHouseNo, claims.provider, claims.sub);
+        .run(cleanName, cleanPhone, cleanEmail, placeholderPassword, cleanHouseNo, cleanBlock, cleanHouseNo, cleanStatus, claims.provider, claims.sub);
       return db
-        .prepare('SELECT id, name, phone, username, email, flat_no, block, house_no, role, role_detail, status FROM users WHERE id = ?')
+        .prepare('SELECT id, name, phone, username, email, flat_no, block, house_no, resident_status, role, role_detail, status FROM users WHERE id = ?')
         .get(info.lastInsertRowid);
     })();
   } catch (err) {
@@ -599,7 +654,7 @@ router.patch('/me', authRequired, (req, res) => {
     req.user.id
   );
   const user = db
-    .prepare('SELECT id, name, phone, username, email, flat_no, block, house_no, role, role_detail, status FROM users WHERE id = ?')
+    .prepare('SELECT id, name, phone, username, email, flat_no, block, house_no, resident_status, role, role_detail, status FROM users WHERE id = ?')
     .get(req.user.id);
   res.json({ user });
 });
