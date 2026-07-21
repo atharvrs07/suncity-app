@@ -3,6 +3,7 @@ const db = require('../db');
 const cfg = require('../config');
 const { authRequired, requirePermission, isAdmin } = require('../middleware/auth');
 const { logAudit } = require('../lib/audit');
+const { notifyAll, notifyRoles } = require('../lib/notify');
 
 const router = express.Router();
 router.use(authRequired);
@@ -11,7 +12,7 @@ router.get('/', (req, res) => {
   const where = isAdmin(req.user) ? '1=1' : 'n.admin_only = 0';
   const notices = db
     .prepare(
-      `SELECT n.*, u.name AS poster_name, u.role AS poster_role, u.role_detail AS poster_role_detail
+      `SELECT n.*, u.name AS poster_name, u.role AS poster_role, u.role_detail AS poster_role_detail, u.avatar AS poster_avatar
        FROM notices n JOIN users u ON u.id = n.posted_by
        WHERE ${where}
        ORDER BY n.pinned DESC, n.created_at DESC`
@@ -30,6 +31,13 @@ router.post('/', requirePermission('manage_notices'), (req, res) => {
     .prepare('INSERT INTO notices (title, body, category, pinned, admin_only, posted_by) VALUES (?, ?, ?, ?, ?, ?)')
     .run(title.trim(), body.trim(), cat, pinned ? 1 : 0, adminOnly, req.user.id);
   logAudit({ actor: req.user, action: 'notice_post', targetType: 'notice', targetId: info.lastInsertRowid, detail: title.trim() });
+  // Notify recipients of the new notice (item 4). Admin-only notices go to
+  // admins/super_admin only; general notices go to everyone but the poster.
+  if (adminOnly) {
+    notifyRoles(['admin', 'super_admin'], { type: 'notice', title: `New notice: ${title.trim()}`, body: body.trim().slice(0, 120), link: '/notices' });
+  } else {
+    notifyAll({ type: 'notice', title: `New notice: ${title.trim()}`, body: body.trim().slice(0, 120), link: '/notices', excludeUserId: req.user.id });
+  }
   res.status(201).json({ id: info.lastInsertRowid, message: 'Notice posted' });
 });
 

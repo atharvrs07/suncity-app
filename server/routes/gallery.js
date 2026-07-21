@@ -10,7 +10,7 @@ router.use(authRequired);
 router.get('/', (req, res) => {
   const photos = db
     .prepare(
-      `SELECT g.*, u.name AS uploader_name FROM gallery_photos g JOIN users u ON u.id = g.uploaded_by
+      `SELECT g.*, u.name AS uploader_name, u.avatar AS uploader_avatar FROM gallery_photos g JOIN users u ON u.id = g.uploaded_by
        ORDER BY g.created_at DESC`
     )
     .all();

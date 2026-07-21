@@ -1,18 +1,34 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { api, fmtDate, fmtDateTime } from '../api';
 import { useFetch } from '../hooks';
 import { useAuth } from '../auth';
 import { GlassCard, Btn, Chip, Field, Sheet, Empty, Spinner, StaggerList, StaggerItem } from '../components/Glass';
+import EventsCalendar from '../components/EventsCalendar';
+
+const EMPTY = { heading: '', details: '', event_date: '', photo: null };
 
 export default function Events() {
   const { user } = useAuth();
   const { data, loading, reload } = useFetch('/api/events');
-  const [showNew, setShowNew] = useState(false);
-  const [form, setForm] = useState({ heading: '', details: '', event_date: '', photo: null });
+  const [sheet, setSheet] = useState(null); // null | { mode:'new' } | { mode:'edit', ev }
+  const [form, setForm] = useState(EMPTY);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
   const canPost = data ? data.can_post : false;
+  const isAdmin = user.role === 'admin' || user.role === 'super_admin';
+  const canEditEv = (ev) => canPost && (isAdmin || ev.posted_by === user.id);
+
+  const openNew = () => {
+    setForm(EMPTY);
+    setError('');
+    setSheet({ mode: 'new' });
+  };
+  const openEdit = (ev) => {
+    setForm({ heading: ev.heading, details: ev.details || '', event_date: ev.event_date || '', photo: null });
+    setError('');
+    setSheet({ mode: 'edit', ev });
+  };
 
   async function submit(e) {
     e.preventDefault();
@@ -22,11 +38,15 @@ export default function Events() {
       const fd = new FormData();
       fd.append('heading', form.heading);
       fd.append('details', form.details);
-      if (form.event_date) fd.append('event_date', form.event_date);
+      fd.append('event_date', form.event_date || '');
       if (form.photo) fd.append('photo', form.photo);
-      await api('/api/events', { method: 'POST', form: fd });
-      setShowNew(false);
-      setForm({ heading: '', details: '', event_date: '', photo: null });
+      if (sheet.mode === 'edit') {
+        await api(`/api/events/${sheet.ev.id}`, { method: 'PATCH', form: fd });
+      } else {
+        await api('/api/events', { method: 'POST', form: fd });
+      }
+      setSheet(null);
+      setForm(EMPTY);
       reload();
     } catch (err) {
       setError(err.message);
@@ -54,10 +74,17 @@ export default function Events() {
           <h1 className="page-title">Society Events</h1>
           <p className="page-sub">What's happening in Suncity Vistaar</p>
         </div>
-        {canPost && <Btn onClick={() => setShowNew(true)}>+ Event</Btn>}
+        {canPost && <Btn onClick={openNew}>+ Event</Btn>}
       </div>
 
       {loading && <Spinner />}
+
+      {data && data.events.some((e) => e.event_date) && (
+        <div style={{ marginBottom: 14 }}>
+          <EventsCalendar events={data.events} onEventClick={(ev) => (canEditEv(ev) ? openEdit(ev) : null)} />
+        </div>
+      )}
+
       {!loading && data && data.events.length === 0 && (
         <Empty emoji="🎪" title="No events yet" sub="Celebrations and gatherings will show up here." />
       )}
@@ -66,7 +93,6 @@ export default function Events() {
         {data &&
           data.events.map((ev) => {
             const upcoming = ev.event_date && ev.event_date >= today;
-            const canEdit = user.role === 'admin' || ev.posted_by === user.id;
             return (
               <StaggerItem key={ev.id}>
                 <GlassCard>
@@ -87,10 +113,15 @@ export default function Events() {
                     <span className="tiny">
                       Posted by {ev.poster_name} · {fmtDateTime(ev.created_at)}
                     </span>
-                    {canPost && canEdit && (
-                      <Btn variant="danger" sm onClick={() => remove(ev)}>
-                        Delete
-                      </Btn>
+                    {canEditEv(ev) && (
+                      <div className="row" style={{ gap: 6 }}>
+                        <Btn variant="ghost" sm onClick={() => openEdit(ev)}>
+                          Edit
+                        </Btn>
+                        <Btn variant="danger" sm onClick={() => remove(ev)}>
+                          Delete
+                        </Btn>
+                      </div>
                     )}
                   </div>
                 </GlassCard>
@@ -99,7 +130,7 @@ export default function Events() {
           })}
       </StaggerList>
 
-      <Sheet open={showNew} onClose={() => setShowNew(false)} title="New Event">
+      <Sheet open={!!sheet} onClose={() => setSheet(null)} title={sheet && sheet.mode === 'edit' ? 'Edit Event' : 'New Event'}>
         {error && <div className="err-banner">{error}</div>}
         <form onSubmit={submit}>
           <Field label="EVENT HEADING">
@@ -125,16 +156,17 @@ export default function Events() {
               onChange={(e) => setForm((f) => ({ ...f, event_date: e.target.value }))}
             />
           </Field>
-          <Field label="PHOTO (OPTIONAL)">
+          <Field label={sheet && sheet.mode === 'edit' ? 'REPLACE PHOTO (OPTIONAL)' : 'PHOTO (OPTIONAL)'}>
             <input
               className="input"
               type="file"
               accept="image/*"
               onChange={(e) => setForm((f) => ({ ...f, photo: e.target.files[0] || null }))}
             />
+            <span className="tiny" style={{ marginTop: 4 }}>Event photos are also added to the Photo Gallery.</span>
           </Field>
           <Btn block disabled={busy} type="submit">
-            {busy ? 'Posting…' : 'Post Event'}
+            {busy ? 'Saving…' : sheet && sheet.mode === 'edit' ? 'Save Changes' : 'Post Event'}
           </Btn>
         </form>
       </Sheet>

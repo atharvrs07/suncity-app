@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { api, fmtMoney, fmtDateTime } from '../api';
+import { useTranslation } from 'react-i18next';
+import { api, fmtMoney, fmtDate, fmtDateTime } from '../api';
 import { useFetch } from '../hooks';
 import { useAuth } from '../auth';
 import { GlassCard, Btn, Chip, Field, Toggle, Sheet, Segmented, Empty, Spinner, StaggerList, StaggerItem, PasswordInput } from '../components/Glass';
@@ -14,6 +15,7 @@ import {
   capitalizeName,
 } from '../constants';
 import BlockHousePicker from '../components/BlockHousePicker';
+import Avatar from '../components/Avatar';
 
 // Roles an admin may assign from the editor (mirrors the server's ASSIGNABLE_ROLES).
 const ROLE_OPTIONS = [
@@ -27,16 +29,18 @@ const TABS = [
   { value: 'automations', label: 'Automated Dues' },
   { value: 'users', label: 'Users' },
   { value: 'activity', label: 'Activity Log' },
-  { value: 'society', label: 'Society' },
+  { value: 'society', label: 'Payments & QR' },
 ];
 
 export default function Admin() {
+  const { t } = useTranslation();
   const [tab, setTab] = useState('automations');
   return (
     <>
       <div className="page-head">
         <div>
-          <h1 className="page-title">Admin</h1>
+          {/* Display label is "Control Panel" (item 12); routes/roles unchanged. */}
+          <h1 className="page-title">{t('nav.controlPanel')}</h1>
           <p className="page-sub">System settings & management</p>
         </div>
       </div>
@@ -393,7 +397,8 @@ function UsersTab() {
             <StaggerItem key={u.id}>
               <GlassCard>
                 <div className="row-between">
-                  <span className="title-sm">
+                  <span className="title-sm row" style={{ gap: 8 }}>
+                    <Avatar name={u.name} src={u.avatar} size="sm" />
                     {u.name}
                     {u.id === me.id ? ' (you)' : ''}
                   </span>
@@ -408,6 +413,9 @@ function UsersTab() {
                   {u.flat_no ? ` · Flat ${u.flat_no}` : ''}
                   {u.resident_status ? ` · 👤 ${residentStatusLabel(u.resident_status)}` : ''}
                 </p>
+                {u.last_active_at && (
+                  <p className="tiny" style={{ marginTop: 3 }}>🕓 Last active {fmtDateTime(u.last_active_at)}</p>
+                )}
                 {u.role === 'office_bearer' && (
                   <p className="tiny" style={{ marginTop: 5 }}>
                     🔑{' '}
@@ -458,8 +466,9 @@ function UsersTab() {
                   className="input"
                   type="tel"
                   inputMode="numeric"
+                  maxLength={10}
                   value={form.phone}
-                  onChange={(e) => setForm((f) => ({ ...f, phone: e.target.value }))}
+                  onChange={(e) => setForm((f) => ({ ...f, phone: e.target.value.replace(/\D/g, '').slice(0, 10) }))}
                   placeholder="10-digit mobile number"
                 />
               </Field>
@@ -726,22 +735,113 @@ function ActivityTab() {
   );
 }
 
+// Editable payment settings (item 21): VPA, payee, and an optional society-
+// provided QR image. Stored in app_settings so they change without a redeploy.
 function SocietyTab() {
-  const { data, loading } = useFetch('/api/dues/upi-config');
-  if (loading) return <Spinner />;
+  const { data, loading, reload } = useFetch('/api/settings/payment');
+  const [form, setForm] = useState(null);
+  const [msg, setMsg] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  // Hydrate the local form once the config loads.
+  if (data && !form) setForm({ vpa: data.vpa || '', payee_name: data.payee_name || '' });
+
+  async function save(e) {
+    e.preventDefault();
+    setBusy(true);
+    setMsg(null);
+    try {
+      await api('/api/settings/payment', { method: 'PATCH', body: form });
+      setMsg({ ok: true, text: 'Payment details saved' });
+      reload();
+    } catch (err) {
+      setMsg({ ok: false, text: err.message });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function uploadQr(file) {
+    if (!file) return;
+    setBusy(true);
+    setMsg(null);
+    try {
+      const fd = new FormData();
+      fd.append('qr', file);
+      await api('/api/settings/payment/qr', { method: 'POST', form: fd });
+      setMsg({ ok: true, text: 'QR image updated' });
+      reload();
+    } catch (err) {
+      setMsg({ ok: false, text: err.message });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function clearQr() {
+    setBusy(true);
+    try {
+      await api('/api/settings/payment/qr', { method: 'DELETE' });
+      reload();
+    } catch (err) {
+      setMsg({ ok: false, text: err.message });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (loading || !form) return <Spinner />;
+
   return (
-    <GlassCard>
-      <h2 className="title-sm">💳 UPI collection details</h2>
-      <p className="muted" style={{ marginTop: 8 }}>
-        VPA: <b>{data ? data.vpa : '—'}</b>
-      </p>
-      <p className="muted" style={{ marginTop: 4 }}>
-        Payee name: <b>{data ? data.payee_name : '—'}</b>
-      </p>
-      <p className="tiny" style={{ marginTop: 10 }}>
-        These come from SOCIETY_UPI_VPA and SOCIETY_UPI_PAYEE_NAME in the server's .env file. Payment QR codes
-        shown to residents are generated from these values.
-      </p>
-    </GlassCard>
+    <div className="stack">
+      {msg && <div className={msg.ok ? 'ok-banner' : 'err-banner'}>{msg.text}</div>}
+      <GlassCard>
+        <h2 className="title-sm" style={{ marginBottom: 10 }}>💳 UPI collection details</h2>
+        <form onSubmit={save}>
+          <Field label="UPI ID / VPA">
+            <input
+              className="input break-anywhere"
+              value={form.vpa}
+              onChange={(e) => setForm((f) => ({ ...f, vpa: e.target.value }))}
+              placeholder="society@upi"
+            />
+          </Field>
+          <Field label="PAYEE NAME">
+            <input
+              className="input"
+              value={form.payee_name}
+              onChange={(e) => setForm((f) => ({ ...f, payee_name: e.target.value }))}
+              placeholder="My Suncity Vistaar"
+            />
+          </Field>
+          <Btn disabled={busy} type="submit">
+            {busy ? 'Saving…' : 'Save Details'}
+          </Btn>
+        </form>
+      </GlassCard>
+
+      <GlassCard>
+        <h2 className="title-sm" style={{ marginBottom: 8 }}>🔳 Payment QR image</h2>
+        <p className="tiny" style={{ marginBottom: 10 }}>
+          Upload the society's official QR here. If none is set, a UPI QR is generated automatically from the VPA above.
+        </p>
+        {data.qr_image && (
+          <div className="qr-frame" style={{ margin: '0 auto 12px' }}>
+            <img src={data.qr_image} alt="Payment QR" />
+          </div>
+        )}
+        <div className="row wrap" style={{ gap: 8 }}>
+          <label className="btn btn-ghost btn-sm" style={{ cursor: 'pointer' }}>
+            {busy ? '…' : data.qr_image ? 'Replace QR' : 'Upload QR'}
+            <input type="file" accept="image/*" style={{ display: 'none' }} onChange={(e) => uploadQr(e.target.files[0])} />
+          </label>
+          {data.qr_image && (
+            <Btn variant="danger" sm onClick={clearQr} disabled={busy}>
+              Clear QR
+            </Btn>
+          )}
+        </div>
+      </GlassCard>
+    </div>
   );
 }

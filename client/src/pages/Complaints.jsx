@@ -3,7 +3,12 @@ import { api, fmtDateTime } from '../api';
 import { useFetch } from '../hooks';
 import { useAuth } from '../auth';
 import { GlassCard, Btn, Chip, Field, Sheet, Segmented, Empty, Spinner, StaggerList, StaggerItem } from '../components/Glass';
-import { COMPLAINT_CATEGORIES, COMPLAINT_STATUS, catMeta } from '../constants';
+import Avatar from '../components/Avatar';
+import { COMPLAINT_CATEGORY_OPTIONS, COMPLAINT_STATUS, catMeta } from '../constants';
+
+// Where a complaint is routed (item 8) — shown as a small chip for managers.
+const routeChip = (role) =>
+  role === 'cleaning' ? { label: '🧹 Cleaning', tone: 'blue' } : role === 'maintenance' ? { label: '🔧 Maintenance', tone: 'purple' } : null;
 
 const FILTERS = [
   { value: 'all', label: 'All' },
@@ -89,10 +94,18 @@ export default function Complaints() {
                   </span>
                   <Chip tone={st.tone}>{st.label}</Chip>
                 </div>
-                <p className="muted" style={{ marginTop: 5 }}>
-                  {cat.label}
-                  {canManage ? ` · ${c.resident_name}${c.resident_flat ? ` (${c.resident_flat})` : ''}` : ''}
-                </p>
+                {canManage ? (
+                  <div className="row" style={{ marginTop: 6, gap: 8 }}>
+                    <Avatar name={c.resident_name} src={c.resident_avatar} size="xs" />
+                    <span className="muted grow">
+                      {cat.label} · {c.resident_name}
+                      {c.resident_flat ? ` (${c.resident_flat})` : ''}
+                    </span>
+                    {routeChip(c.assigned_role) && <Chip tone={routeChip(c.assigned_role).tone}>{routeChip(c.assigned_role).label}</Chip>}
+                  </div>
+                ) : (
+                  <p className="muted" style={{ marginTop: 5 }}>{cat.label}</p>
+                )}
                 <p className="tiny" style={{ marginTop: 4 }}>
                   {fmtDateTime(c.created_at)}
                 </p>
@@ -122,21 +135,20 @@ export default function Complaints() {
             <p style={{ fontSize: 14.5, lineHeight: 1.55 }}>{selected.description}</p>
             {selected.photo && <img className="thumb" src={selected.photo} alt="complaint" />}
             <p className="tiny">Submitted {fmtDateTime(selected.created_at)}</p>
+            {selected.assigned_role && canManage && routeChip(selected.assigned_role) && (
+              <p className="tiny">Routed to the {selected.assigned_role} supervisor.</p>
+            )}
             {canManage && (
               <div className="row wrap">
-                {selected.status !== 'in_progress' && (
+                {!['in_progress', 'closed'].includes(selected.status) && (
                   <Btn variant="ghost" sm onClick={() => setStatus(selected.id, 'in_progress')}>
                     🔧 Start Work
                   </Btn>
                 )}
-                {selected.status !== 'resolved' && (
-                  <Btn variant="success" sm onClick={() => setStatus(selected.id, 'resolved')}>
-                    ✓ Resolve
-                  </Btn>
-                )}
+                {/* Resolving auto-closes the complaint — no separate close step (item 9). */}
                 {selected.status !== 'closed' && (
-                  <Btn variant="ghost" sm onClick={() => setStatus(selected.id, 'closed')}>
-                    Close
+                  <Btn variant="success" sm onClick={() => setStatus(selected.id, 'resolved')}>
+                    ✓ Resolve &amp; Close
                   </Btn>
                 )}
                 {selected.status === 'closed' && (
@@ -160,7 +172,7 @@ export default function Complaints() {
               value={form.category}
               onChange={(e) => setForm((f) => ({ ...f, category: e.target.value }))}
             >
-              {COMPLAINT_CATEGORIES.map((c) => (
+              {COMPLAINT_CATEGORY_OPTIONS.map((c) => (
                 <option key={c.value} value={c.value}>
                   {c.emoji} {c.label}
                 </option>

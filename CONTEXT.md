@@ -380,6 +380,87 @@ address bar / chrome), like a native app.
   resolve directly. Verified 2026-07-21: build emits all assets, endpoints return 200
   with correct types.
 
+## Feature batch — mobile, theming, i18n, notifications, AI payments (added 2026-07-21)
+
+A large multi-feature batch. New shared infra + per-module wiring:
+
+- **Complaint categories trimmed** — `parking, housekeeping, plumbing, security` are
+  retired from the submission form (`REMOVED_COMPLAINT_CATEGORIES` /
+  `COMPLAINT_CATEGORY_OPTIONS` in `config.js`, mirrored via a `removed` flag in
+  `constants.js`). The full list stays for labelling historical complaints; the API
+  rejects NEW complaints in a retired category. No existing complaints deleted.
+- **Sticky nav + global branding + mobile audit** — the topbar was already
+  `position:fixed`; a new fixed `.brand-strip` (component `BrandStrip`) shows
+  "SunCity Vistaar - Jan Kalyan Samiti" at the very top of *every* screen (auth
+  included), rendered once at the app root. Added viewport/overflow safeguards,
+  `.hscroll`/`.break-anywhere` helpers, and 430px breakpoints for iPhone-class widths.
+- **Phone inputs capped at 10 digits** everywhere (client `maxLength`+digit filter on
+  Login/Signup/OAuth-complete/admin edit; server already normalises to 10). Lost &
+  Found contact phone is now **read-only, auto-filled** with the poster's own number
+  (server pins `contact_phone = req.user.phone`).
+- **In-app notifications + bell** — `notifications` table + `lib/notify.js`
+  (`notifyAll/notifyUsers/notifyRoles`) + `routes/notifications.js`. Navbar
+  `NotificationBell` polls unread count (45s), opens a history sheet with read state.
+  Fan-out on new notice/event/lost&found/complaint update/due/payment status.
+  **Chose in-app over Web Push** (no service worker / VAPID configured yet; works on
+  all PWA targets today). Transport can be swapped behind `lib/notify.js` later.
+- **Light/Dark theme** — `theme.jsx` provider sets `data-theme` on `<html>`,
+  persisted in localStorage; `styles.css` defines dark variants of the existing
+  tokens. Topbar `ThemeToggle` + full control in Settings.
+- **i18n (English/Hindi)** — i18next + react-i18next (`src/i18n.js`), persisted in
+  localStorage. Nav/common/home/dues/settings/auth/notifications keyed; deeper page
+  bodies fall back to English and can be keyed incrementally. Toggle in Settings.
+- **Gemini integration** — `lib/gemini.js` (dependency-free REST via global fetch):
+  `isConfigured/generateContent/analyzePaymentScreenshot`. `GEMINI_API_KEY`(+`GEMINI_MODEL`)
+  in `.env`. Reusable; used by the AI payment check.
+- **Complaint routing + auto-close** — `complaints.assigned_role` stamped on creation
+  (`park/drainage/road → cleaning`, else `maintenance`); the matching supervisor +
+  admins are notified. Setting a complaint **Resolved** now auto-transitions to
+  **Closed** in one step.
+- **Events calendar + edit + gallery mirror** — `EventsCalendar` (month grid + Past/
+  Upcoming toggle) on Home and Events. Creators/admins can **edit** events
+  (`PATCH /api/events/:id`). Event photos auto-mirror into the Photo Gallery
+  (`gallery_photos.source_event_id`, idempotent).
+- **Control Panel** — the "Admin" nav/page label is now "Control Panel" (display only;
+  roles/routes unchanged).
+- **Watermark** — confirmed global (rendered once at app root, all routes).
+- **Remember me** — Login/Signup "Stay logged in" → 30-day JWT (vs 7-day). `sign()`
+  takes `{ remember, sid }`.
+- **Profile pictures** — `users.avatar`; `POST/DELETE /api/auth/me/avatar` (reuses the
+  shared upload infra). Avatar shown next to names across complaints/notices/lost&found/
+  gallery/users list/nav (`components/Avatar.jsx`).
+- **Session activity** — `user_sessions` table (one row per login; `last_seen_at`
+  bumped, throttled 60s, via `sid` in the JWT) + `users.last_login_at/last_active_at/
+  login_count`. `GET /api/auth/sessions`; shown in Settings; admins see "last active"
+  on each user card.
+- **Home redesign** — Dues card is the topmost content module, then a payment QR
+  block, quick actions, the events calendar, and recent notices. Summary cards have
+  click-to-show-more navigating to their tab.
+- **Per-block dues + unpaid drill-down** — an all-residents due accepts an optional
+  `block_amounts` map (`due_automations.block_amounts` reserved for later automation
+  use). Control-Panel dues shows an **unpaid-residents** card (`GET /api/dues/unpaid-
+  residents`) that expands to a list with a `CallButton` (phone-present/absent
+  branching, shared with Overdue Watch).
+- **Payment QR + VPA** — admin-settable in Control Panel → Payments & QR
+  (`app_settings` table via `lib/settings.js`, `routes/settings.js`): VPA, payee, and
+  an uploadable QR image. `PaymentQR` component (Home + Pay sheet) renders the image
+  or a generated UPI QR, downloads it, and copies the VPA.
+- **AI-verified payment screenshots** — `POST /api/dues/:id/payment` now takes an
+  optional screenshot; Gemini extracts txn id + date-time, checks legitimacy/recency
+  and **duplicate txn ids** across payments. On pass → provisional receipt emailed
+  automatically ("Provisional Receipt — Subject to Payment Verification by Society");
+  suspicious/unreadable → flagged for admins, no provisional. Admin/OB **manual
+  verify** issues the final (unwatermarked) receipt. New `payments` columns:
+  `screenshot, txn_id, txn_datetime, amount_detected, ai_verdict, ai_reason,
+  ai_checked_at, provisional_receipt_at, receipt_at`. Receipts via
+  `mailer.sendPaymentReceiptEmail`. With no `GEMINI_API_KEY`, AI is skipped and
+  payments go straight to manual verification.
+- Migrations: `migrateFeatureBatch2026()` (guarded ADD COLUMNs) + new tables from the
+  base `CREATE TABLE IF NOT EXISTS` block + `seedSettings()`. Verified: fresh boot +
+  old-DB migration, login/notifications/settings/dues/unpaid/sessions endpoints,
+  notice fan-out, complaint routing (electrical→maintenance), payment submit/verify
+  (final receipt), resolve→closed auto-transition. Client build clean.
+
 ## Key invariants (enforce on any change)
 
 - **RBAC lives on the API**, not just the UI. Roles: super_admin (hidden, all-powerful),

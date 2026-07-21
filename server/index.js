@@ -26,6 +26,8 @@ app.use('/api/lostfound', require('./routes/lostfound'));
 app.use('/api/events', require('./routes/events'));
 app.use('/api/gallery', require('./routes/gallery'));
 app.use('/api/audit', require('./routes/audit'));
+app.use('/api/notifications', require('./routes/notifications'));
+app.use('/api/settings', require('./routes/settings'));
 
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 

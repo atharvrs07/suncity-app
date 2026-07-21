@@ -137,10 +137,80 @@ function sendPendingAccountAdminEmail({ to, adminName, pending }) {
   return sendMail({ to, subject, text, html });
 }
 
+// Payment receipt (item 22). `provisional` decides the watermark + wording:
+//  - provisional=true  → sent automatically once Gemini's check passes; clearly
+//    marked "Provisional Receipt — Subject to Payment Verification by Society".
+//  - provisional=false → the final/permanent receipt, sent when an admin/office
+//    bearer manually verifies the payment.
+function sendPaymentReceiptEmail({ to, name, receipt, provisional }) {
+  const {
+    receiptNo,
+    amount,
+    periodLabel,
+    txnId,
+    txnDateTime,
+    paidOn,
+    society = 'SunCity Vistaar - Jan Kalyan Samiti',
+  } = receipt;
+  const heading = provisional ? 'Provisional Payment Receipt' : 'Payment Receipt';
+  const subject = provisional
+    ? `Provisional receipt for your payment — ${society}`
+    : `Payment receipt (verified) — ${society}`;
+  const watermark = provisional
+    ? 'PROVISIONAL RECEIPT — SUBJECT TO PAYMENT VERIFICATION BY SOCIETY'
+    : 'VERIFIED BY SOCIETY';
+  const rows = [
+    ['Receipt No.', receiptNo],
+    ['Resident', name],
+    ['For', periodLabel],
+    ['Amount', `₹${amount}`],
+    ['Transaction ID', txnId || '—'],
+    ['Payment date/time', txnDateTime || '—'],
+    ['Recorded on', paidOn],
+  ];
+  const text =
+    `${heading}\n${society}\n\n` +
+    `*** ${watermark} ***\n\n` +
+    rows.map(([k, v]) => `${k}: ${v}`).join('\n') +
+    `\n\n` +
+    (provisional
+      ? 'This is a provisional acknowledgement generated after an automated check of your payment screenshot. It is subject to final verification by the society office. A permanent receipt will follow once verified.\n'
+      : 'This payment has been verified by the society office. This is your final receipt.\n') +
+    `\n— ${society}`;
+  const bannerColor = provisional ? '#e0851a' : '#1fa060';
+  const html = `
+  <div style="font-family:Arial,Helvetica,sans-serif;max-width:560px;margin:0 auto;padding:0;color:#232634;border:1px solid #e6e8f0;border-radius:14px;overflow:hidden;">
+    <div style="background:${bannerColor};color:#fff;padding:10px 20px;font-size:12px;font-weight:bold;letter-spacing:0.04em;text-align:center;">
+      ${watermark}
+    </div>
+    <div style="padding:24px;">
+      <h2 style="margin:0 0 2px;">${heading}</h2>
+      <p style="margin:0 0 18px;color:#5d6175;font-size:13px;">${society}</p>
+      <table style="border-collapse:collapse;font-size:14px;width:100%;">
+        ${rows
+          .map(
+            ([k, v]) =>
+              `<tr><td style="padding:7px 12px 7px 0;color:#5d6175;white-space:nowrap;">${k}</td><td style="padding:7px 0;font-weight:600;text-align:right;">${v}</td></tr>`
+          )
+          .join('')}
+      </table>
+      <p style="color:#5d6175;font-size:12.5px;margin-top:20px;line-height:1.5;">
+        ${
+          provisional
+            ? 'This is a provisional acknowledgement generated after an automated check of your payment screenshot. It is <b>subject to final verification by the society</b>. A permanent receipt will follow once the office verifies it.'
+            : 'This payment has been <b>verified by the society office</b>. This is your final receipt.'
+        }
+      </p>
+    </div>
+  </div>`;
+  return sendMail({ to, subject, text, html });
+}
+
 module.exports = {
   sendMail,
   sendPasswordResetEmail,
   sendSignupOtpEmail,
   sendNewResidentAdminEmail,
   sendPendingAccountAdminEmail,
+  sendPaymentReceiptEmail,
 };

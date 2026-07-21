@@ -2,8 +2,45 @@ const jwt = require('jsonwebtoken');
 const cfg = require('../config');
 const db = require('../db');
 
-function sign(user) {
-  return jwt.sign({ id: user.id, role: user.role }, cfg.JWT_SECRET, { expiresIn: '7d' });
+// Sign a session JWT. `remember` extends the lifetime (Stay-logged-in, item 15);
+// `sid` links the token to a user_sessions row so activity can be tracked (item 17).
+function sign(user, { remember = false, sid = null } = {}) {
+  const payload = { id: user.id, role: user.role };
+  if (sid) payload.sid = sid;
+  return jwt.sign(payload, cfg.JWT_SECRET, { expiresIn: remember ? '30d' : '7d' });
+}
+
+// Open a session activity row at login and return its id (to embed in the JWT).
+// Best-effort — never blocks login if the write fails.
+function startSession(user, req) {
+  try {
+    const ua = String((req && req.headers && req.headers['user-agent']) || '').slice(0, 300);
+    const info = db.prepare('INSERT INTO user_sessions (user_id, user_agent) VALUES (?, ?)').run(user.id, ua);
+    db.prepare(
+      "UPDATE users SET last_login_at = datetime('now'), last_active_at = datetime('now'), login_count = login_count + 1 WHERE id = ?"
+    ).run(user.id);
+    return info.lastInsertRowid;
+  } catch (err) {
+    console.error('[session] startSession failed:', err.message);
+    return null;
+  }
+}
+
+// Bump last-seen for the user + their session, throttled to once a minute so a
+// busy client doesn't hammer the DB on every request.
+const bumpActive = db.prepare(
+  "UPDATE users SET last_active_at = datetime('now') WHERE id = ? AND (last_active_at IS NULL OR last_active_at < datetime('now','-60 seconds'))"
+);
+const bumpSession = db.prepare(
+  "UPDATE user_sessions SET last_seen_at = datetime('now') WHERE id = ? AND user_id = ? AND last_seen_at < datetime('now','-60 seconds')"
+);
+function touchActivity(userId, sid) {
+  try {
+    bumpActive.run(userId);
+    if (sid) bumpSession.run(sid, userId);
+  } catch {
+    /* activity tracking must never break a request */
+  }
 }
 
 // Parse the JSON permissions column into a string array (tolerant of null/garbage).
@@ -45,7 +82,7 @@ function authRequired(req, res, next) {
   }
   const user = db
     .prepare(
-      'SELECT id, name, phone, username, email, flat_no, block, house_no, resident_status, role, role_detail, permissions, status FROM users WHERE id = ?'
+      'SELECT id, name, phone, username, email, flat_no, block, house_no, resident_status, role, role_detail, permissions, avatar, last_active_at, last_login_at, status FROM users WHERE id = ?'
     )
     .get(payload.id);
   if (!user || user.status !== 'approved') {
@@ -54,6 +91,7 @@ function authRequired(req, res, next) {
   // Re-fetching + re-parsing on every request means permission/role changes take
   // effect immediately (same guarantee as status-based revocation).
   user.permissions = parsePermissions(user.permissions);
+  touchActivity(user.id, payload.sid);
   req.user = user;
   next();
 }
@@ -73,4 +111,4 @@ const requirePermission = (perm) => (req, res, next) => {
   return res.status(403).json({ error: 'Not allowed' });
 };
 
-module.exports = { sign, authRequired, requireRoles, requirePermission, hasPermission, isAdmin };
+module.exports = { sign, startSession, authRequired, requireRoles, requirePermission, hasPermission, isAdmin };

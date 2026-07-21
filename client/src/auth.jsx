@@ -15,15 +15,15 @@ export function AuthProvider({ children }) {
       .finally(() => setLoading(false));
   }, []);
 
-  const login = useCallback(async (phone, password) => {
-    const d = await api('/api/auth/login', { method: 'POST', body: { phone, password } });
+  const login = useCallback(async (phone, password, remember = false) => {
+    const d = await api('/api/auth/login', { method: 'POST', body: { phone, password, remember } });
     setToken(d.token);
     setUser(d.user);
     return d.user;
   }, []);
 
-  const obLogin = useCallback(async (username, password) => {
-    const d = await api('/api/auth/ob-login', { method: 'POST', body: { username, password } });
+  const obLogin = useCallback(async (username, password, remember = false) => {
+    const d = await api('/api/auth/ob-login', { method: 'POST', body: { username, password, remember } });
     setToken(d.token);
     setUser(d.user);
     return d.user;

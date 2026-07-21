@@ -10,6 +10,7 @@ export default function Login() {
   const navigate = useNavigate();
   const [phone, setPhone] = useState('');
   const [password, setPassword] = useState('');
+  const [remember, setRemember] = useState(false);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -18,7 +19,7 @@ export default function Login() {
     setBusy(true);
     setError('');
     try {
-      await login(phone, password);
+      await login(phone, password, remember);
       navigate('/', { replace: true });
     } catch (err) {
       setError(err.message);
@@ -47,9 +48,10 @@ export default function Login() {
               className="input"
               type="tel"
               inputMode="numeric"
+              maxLength={10}
               placeholder="10-digit mobile number"
               value={phone}
-              onChange={(e) => setPhone(e.target.value)}
+              onChange={(e) => setPhone(e.target.value.replace(/\D/g, '').slice(0, 10))}
               required
             />
           </Field>
@@ -61,11 +63,15 @@ export default function Login() {
               required
             />
           </Field>
-          <p style={{ textAlign: 'right', marginTop: -6, marginBottom: 13 }}>
+          <div className="row-between" style={{ marginTop: -4, marginBottom: 13 }}>
+            <label className="row" style={{ gap: 7, cursor: 'pointer', fontSize: 13.5, fontWeight: 600 }}>
+              <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
+              Stay logged in
+            </label>
             <Link to="/forgot-password" className="muted" style={{ fontSize: 13.5 }}>
               Forgot password?
             </Link>
-          </p>
+          </div>
           <Btn block disabled={busy} type="submit">
             {busy ? 'Signing in…' : 'Sign In'}
           </Btn>

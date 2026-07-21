@@ -4,6 +4,11 @@ const cfg = require('../config');
 const { authRequired, requirePermission } = require('../middleware/auth');
 const { logAudit } = require('../lib/audit');
 const { localDateStr } = require('../lib/dates');
+const { paymentConfig } = require('../lib/settings');
+const { notifyUsers } = require('../lib/notify');
+const gemini = require('../lib/gemini');
+const { sendPaymentReceiptEmail } = require('../lib/mailer');
+const upload = require('../lib/uploads');
 
 const router = express.Router();
 router.use(authRequired);
@@ -12,8 +17,17 @@ router.use(authRequired);
 // permission (admins and the super admin always pass).
 const canManageDues = requirePermission('manage_dues');
 
+const SOCIETY_NAME = 'SunCity Vistaar - Jan Kalyan Samiti';
+
+// Latest payment for a due — includes the AI-check fields so both the resident
+// and admin UIs can show what state the payment is in (item 22).
 const LATEST_PAYMENT = `(
-  SELECT json_object('id', p.id, 'utr_reference', p.utr_reference, 'status', p.status, 'created_at', p.created_at)
+  SELECT json_object(
+    'id', p.id, 'utr_reference', p.utr_reference, 'status', p.status, 'created_at', p.created_at,
+    'screenshot', p.screenshot, 'txn_id', p.txn_id, 'txn_datetime', p.txn_datetime,
+    'ai_verdict', p.ai_verdict, 'ai_reason', p.ai_reason,
+    'provisional_receipt_at', p.provisional_receipt_at, 'receipt_at', p.receipt_at
+  )
   FROM payments p WHERE p.due_id = d.id ORDER BY p.created_at DESC, p.id DESC LIMIT 1
 )`;
 
@@ -22,8 +36,9 @@ const EXTENSION_DAYS_USED = `(
   WHERE e.due_id = d.id AND e.status IN ('pending', 'approved')
 )`;
 
+// Payment config (VPA + payee + optional QR image) — admin-settable (item 21).
 router.get('/upi-config', (req, res) => {
-  res.json({ vpa: cfg.UPI_VPA, payee_name: cfg.UPI_PAYEE });
+  res.json(paymentConfig());
 });
 
 router.get('/mine', (req, res) => {
@@ -38,20 +53,156 @@ router.get('/mine', (req, res) => {
   res.json({ dues });
 });
 
-router.post('/:id/payment', (req, res) => {
-  const { utr_reference } = req.body || {};
-  const utr = String(utr_reference || '').trim();
-  if (utr.length < 6) return res.status(400).json({ error: 'Enter the UTR / transaction reference from your UPI app' });
+// Build the receipt payload for a verified/provisional payment.
+function buildReceipt(payment, due, user) {
+  return {
+    receiptNo: `SCV-${String(payment.id).padStart(6, '0')}`,
+    amount: Number(due.amount).toLocaleString('en-IN'),
+    periodLabel: due.period_label,
+    txnId: payment.txn_id || payment.utr_reference || null,
+    txnDateTime: payment.txn_datetime || null,
+    paidOn: localDateStr(),
+    society: SOCIETY_NAME,
+  };
+}
+
+// Send a receipt email if the resident has an email on file. Returns whether it
+// was attempted so the caller can record the timestamp.
+function sendReceipt(payment, due, user, provisional) {
+  if (!user || !user.email) return false;
+  sendPaymentReceiptEmail({ to: user.email, name: user.name, receipt: buildReceipt(payment, due, user), provisional }).catch(
+    (err) => console.error('[receipt] send failed:', err.message)
+  );
+  return true;
+}
+
+// ---- Resident submits a payment (UTR and/or screenshot) ----
+// If a screenshot is attached and Gemini is configured, it's analysed (item 22):
+// the transaction id + date/time are extracted, checked for duplicates and
+// recency, and — if the check passes — a provisional receipt is emailed
+// automatically. A suspicious result is flagged for admin attention instead. An
+// admin/office bearer still does the final manual verification either way.
+router.post('/:id/payment', upload.single('screenshot'), async (req, res) => {
+  const utrBody = String((req.body && req.body.utr_reference) || '').trim();
+  const screenshot = req.file ? `/uploads/${req.file.filename}` : null;
+  if (!screenshot && utrBody.length < 6) {
+    return res.status(400).json({ error: 'Enter the UTR / transaction reference, or upload a payment screenshot' });
+  }
   const due = db.prepare('SELECT * FROM dues WHERE id = ? AND user_id = ?').get(req.params.id, req.user.id);
   if (!due) return res.status(404).json({ error: 'Due not found' });
   if (due.status === 'paid') return res.status(400).json({ error: 'This due is already paid' });
-  const pendingPayment = db
-    .prepare("SELECT id FROM payments WHERE due_id = ? AND status = 'submitted'")
-    .get(due.id);
+  const pendingPayment = db.prepare("SELECT id FROM payments WHERE due_id = ? AND status = 'submitted'").get(due.id);
   if (pendingPayment) return res.status(400).json({ error: 'A payment for this due is already awaiting verification' });
-  db.prepare('INSERT INTO payments (due_id, user_id, utr_reference) VALUES (?, ?, ?)').run(due.id, req.user.id, utr);
+
+  // Create the payment row up front (state: Submitted). utr_reference falls back
+  // to a placeholder if only a screenshot was given — the AI fills in txn_id.
+  const info = db
+    .prepare('INSERT INTO payments (due_id, user_id, utr_reference, screenshot) VALUES (?, ?, ?, ?)')
+    .run(due.id, req.user.id, utrBody || 'via-screenshot', screenshot);
+  const paymentId = info.lastInsertRowid;
   db.prepare("UPDATE dues SET status = 'submitted' WHERE id = ?").run(due.id);
-  res.status(201).json({ message: 'Payment submitted for verification' });
+
+  let ai = null;
+  if (screenshot && gemini.isConfigured()) {
+    try {
+      const path = require('path');
+      const absPath = path.join(cfg.UPLOADS_DIR, path.basename(screenshot));
+      const result = await gemini.analyzePaymentScreenshot({
+        imagePath: absPath,
+        expectedAmount: due.amount,
+        todayISO: localDateStr(),
+      });
+
+      // Duplicate detection: has this transaction id (or the typed UTR) been
+      // submitted before, on this due or any other? Catches reused/old screenshots.
+      let duplicate = false;
+      const idToCheck = result.transaction_id || utrBody || null;
+      if (idToCheck) {
+        const dup = db
+          .prepare(
+            "SELECT id FROM payments WHERE id != ? AND (txn_id = ? OR utr_reference = ?)"
+          )
+          .get(paymentId, idToCheck, idToCheck);
+        duplicate = !!dup;
+      }
+
+      let verdict = 'suspicious';
+      let reason = result.notes || '';
+      if (!result.ok) {
+        verdict = 'error';
+        reason = result.reason || 'The screenshot could not be read clearly.';
+      } else if (duplicate) {
+        verdict = 'suspicious';
+        reason = 'This transaction ID has already been submitted before (possible duplicate/reused screenshot).';
+      } else if (!result.is_payment_screenshot) {
+        verdict = 'suspicious';
+        reason = reason || "This doesn't look like a payment confirmation screenshot.";
+      } else if (!result.looks_legit) {
+        verdict = 'suspicious';
+        reason = reason || 'The payment details look inconsistent or possibly edited.';
+      } else if (!result.is_recent) {
+        verdict = 'suspicious';
+        reason = reason || 'The payment date/time does not look recent.';
+      } else {
+        verdict = 'pass';
+      }
+
+      const txnId = result.transaction_id || (utrBody || null);
+      db.prepare(
+        `UPDATE payments SET txn_id = ?, txn_datetime = ?, amount_detected = ?, ai_verdict = ?, ai_reason = ?,
+           ai_checked_at = datetime('now'), utr_reference = COALESCE(NULLIF(utr_reference, 'via-screenshot'), ?) WHERE id = ?`
+      ).run(txnId, result.datetime || null, result.amount || null, verdict, reason, txnId || 'via-screenshot', paymentId);
+
+      ai = { verdict, reason, txn_id: txnId, txn_datetime: result.datetime || null };
+
+      // On a passing check, auto-email the resident a PROVISIONAL receipt and
+      // record it. On a suspicious/error check, do NOT send one — flag for admins.
+      const payment = db.prepare('SELECT * FROM payments WHERE id = ?').get(paymentId);
+      if (verdict === 'pass') {
+        if (sendReceipt(payment, due, req.user, true)) {
+          db.prepare("UPDATE payments SET provisional_receipt_at = datetime('now') WHERE id = ?").run(paymentId);
+        }
+        notifyUsers([req.user.id], {
+          type: 'payment',
+          title: 'Payment received — provisional receipt sent',
+          body: `${due.period_label} · ₹${due.amount}. Awaiting final verification by the society.`,
+          link: '/dues',
+        });
+      } else {
+        // Flag suspicious/unreadable submissions to dues managers.
+        const managers = db
+          .prepare("SELECT id FROM users WHERE status = 'approved' AND role IN ('admin','super_admin')")
+          .all()
+          .map((u) => u.id);
+        notifyUsers(managers, {
+          type: 'payment',
+          title: 'Payment screenshot flagged for review',
+          body: `${req.user.name} · ${due.period_label}. ${reason}`.slice(0, 160),
+          link: '/dues',
+        });
+      }
+      logAudit({ actor: req.user, action: 'payment_submit', targetType: 'payment', targetId: paymentId, detail: `AI: ${verdict}` });
+    } catch (err) {
+      console.error('[dues] Gemini check failed:', err.message);
+      db.prepare("UPDATE payments SET ai_verdict = 'error', ai_reason = ?, ai_checked_at = datetime('now') WHERE id = ?").run(
+        'Automated check unavailable — pending manual verification.',
+        paymentId
+      );
+      ai = { verdict: 'error', reason: 'Automated check unavailable — a person will verify it.' };
+    }
+  } else {
+    logAudit({ actor: req.user, action: 'payment_submit', targetType: 'payment', targetId: paymentId, detail: screenshot ? 'screenshot (AI off)' : 'UTR' });
+  }
+
+  res.status(201).json({
+    message:
+      ai && ai.verdict === 'pass'
+        ? 'Payment checked — a provisional receipt has been emailed. Awaiting final verification.'
+        : ai && (ai.verdict === 'suspicious' || ai.verdict === 'error')
+          ? 'Payment submitted. It needs manual verification by the society office.'
+          : 'Payment submitted for verification',
+    ai,
+  });
 });
 
 // ---- Admin ----
@@ -61,7 +212,7 @@ router.get('/', canManageDues, (req, res) => {
   const where = status ? 'd.status = ?' : '1=1';
   const dues = db
     .prepare(
-      `SELECT d.*, u.name AS resident_name, u.phone AS resident_phone, u.flat_no AS resident_flat,
+      `SELECT d.*, u.name AS resident_name, u.phone AS resident_phone, u.flat_no AS resident_flat, u.block AS resident_block,
               ${LATEST_PAYMENT} AS latest_payment
        FROM dues d JOIN users u ON u.id = d.user_id
        WHERE ${where} ORDER BY d.due_date DESC, d.id DESC LIMIT 500`
@@ -71,27 +222,56 @@ router.get('/', canManageDues, (req, res) => {
   res.json({ dues });
 });
 
+// Create a due for one resident or for all residents. For an all-residents due,
+// an optional `block_amounts` map ({ "Vaibhav": 1500, ... }) lets each block get
+// a different amount for the same cycle (item 19); residents in a block not named
+// there fall back to the base `amount`.
 router.post('/', canManageDues, (req, res) => {
-  const { user_id, all_residents, amount, period_label, due_date } = req.body || {};
+  const { user_id, all_residents, amount, block_amounts, period_label, due_date } = req.body || {};
   const amt = Number(amount);
-  if (!Number.isFinite(amt) || amt <= 0) return res.status(400).json({ error: 'Enter a valid amount' });
+  if (!Number.isFinite(amt) || amt <= 0) return res.status(400).json({ error: 'Enter a valid (default) amount' });
   if (!period_label || !period_label.trim()) return res.status(400).json({ error: 'Period label is required' });
   if (!/^\d{4}-\d{2}-\d{2}$/.test(due_date || '')) return res.status(400).json({ error: 'Pick a due date' });
 
+  // Validate the optional per-block override map.
+  const blockMap = {};
+  if (block_amounts && typeof block_amounts === 'object') {
+    for (const [block, value] of Object.entries(block_amounts)) {
+      if (value === '' || value == null) continue;
+      if (!cfg.BLOCKS.includes(block)) return res.status(400).json({ error: `Unknown block: ${block}` });
+      const v = Number(value);
+      if (!Number.isFinite(v) || v <= 0) return res.status(400).json({ error: `Invalid amount for ${block}` });
+      blockMap[block] = v;
+    }
+  }
+
   const insert = db.prepare('INSERT INTO dues (user_id, amount, period_label, due_date) VALUES (?, ?, ?, ?)');
   if (all_residents) {
-    const residents = db.prepare("SELECT id FROM users WHERE role = 'resident' AND status = 'approved'").all();
+    const residents = db.prepare("SELECT id, block FROM users WHERE role = 'resident' AND status = 'approved'").all();
     const tx = db.transaction(() => {
-      for (const r of residents) insert.run(r.id, amt, period_label.trim(), due_date);
+      for (const r of residents) {
+        const rowAmt = r.block && blockMap[r.block] != null ? blockMap[r.block] : amt;
+        insert.run(r.id, rowAmt, period_label.trim(), due_date);
+      }
     });
     tx();
-    logAudit({ actor: req.user, action: 'due_create', detail: `${period_label.trim()} · ₹${amt} · all residents (${residents.length})` });
+    const perBlockNote = Object.keys(blockMap).length ? ` · per-block: ${Object.entries(blockMap).map(([b, v]) => `${b} ₹${v}`).join(', ')}` : '';
+    logAudit({ actor: req.user, action: 'due_create', detail: `${period_label.trim()} · ₹${amt} default · all residents (${residents.length})${perBlockNote}` });
+    // Let residents know a new due was raised (item 4/20).
+    notifyUsers(residents.map((r) => r.id), {
+      type: 'due',
+      title: `New due: ${period_label.trim()}`,
+      body: `Due by ${due_date}`,
+      link: '/dues',
+    });
     return res.status(201).json({ message: `Due created for ${residents.length} resident(s)` });
   }
-  const target = db.prepare("SELECT id FROM users WHERE id = ? AND status = 'approved'").get(user_id);
+  const target = db.prepare("SELECT id, block FROM users WHERE id = ? AND status = 'approved'").get(user_id);
   if (!target) return res.status(400).json({ error: 'Pick an approved resident' });
-  insert.run(target.id, amt, period_label.trim(), due_date);
-  logAudit({ actor: req.user, action: 'due_create', targetType: 'user', targetId: target.id, detail: `${period_label.trim()} · ₹${amt}` });
+  const rowAmt = target.block && blockMap[target.block] != null ? blockMap[target.block] : amt;
+  insert.run(target.id, rowAmt, period_label.trim(), due_date);
+  logAudit({ actor: req.user, action: 'due_create', targetType: 'user', targetId: target.id, detail: `${period_label.trim()} · ₹${rowAmt}` });
+  notifyUsers([target.id], { type: 'due', title: `New due: ${period_label.trim()}`, body: `Due by ${due_date}`, link: '/dues' });
   res.status(201).json({ message: 'Due created' });
 });
 
@@ -100,6 +280,24 @@ router.patch('/:id/mark-paid', canManageDues, (req, res) => {
   if (!due) return res.status(404).json({ error: 'Due not found' });
   db.prepare("UPDATE dues SET status = 'paid' WHERE id = ?").run(due.id);
   res.json({ message: 'Marked as paid' });
+});
+
+// Residents who haven't paid yet (item 19). Grouped per resident with their phone
+// for the Call CTA. "Unpaid" = any due not in the 'paid' state.
+router.get('/unpaid-residents', canManageDues, (req, res) => {
+  const rows = db
+    .prepare(
+      `SELECT u.id AS user_id, u.name, u.phone, u.flat_no, u.block,
+              COUNT(d.id) AS unpaid_count,
+              SUM(d.amount) AS unpaid_amount,
+              SUM(CASE WHEN d.status = 'overdue' THEN 1 ELSE 0 END) AS overdue_count
+       FROM dues d JOIN users u ON u.id = d.user_id
+       WHERE d.status != 'paid'
+       GROUP BY u.id
+       ORDER BY overdue_count DESC, unpaid_amount DESC`
+    )
+    .all();
+  res.json({ residents: rows, count: rows.length });
 });
 
 // Auto-generated Overdue Watch list (admin only): overdue residents with a
@@ -130,10 +328,15 @@ router.get('/payments/list', canManageDues, (req, res) => {
   res.json({ payments });
 });
 
+// Manual verification (item 22): the human confirmation that issues the FINAL
+// receipt. Gemini's verdict only assisted — this is the decision that emails the
+// permanent (unwatermarked) receipt.
 router.post('/payments/:pid/verify', canManageDues, (req, res) => {
   const payment = db.prepare('SELECT * FROM payments WHERE id = ?').get(req.params.pid);
   if (!payment) return res.status(404).json({ error: 'Payment not found' });
   if (payment.status !== 'submitted') return res.status(400).json({ error: 'Payment already reviewed' });
+  const due = db.prepare('SELECT * FROM dues WHERE id = ?').get(payment.due_id);
+  const resident = db.prepare('SELECT id, name, email FROM users WHERE id = ?').get(payment.user_id);
   const tx = db.transaction(() => {
     db.prepare("UPDATE payments SET status = 'verified', reviewed_by = ?, reviewed_at = datetime('now') WHERE id = ?").run(
       req.user.id,
@@ -142,8 +345,19 @@ router.post('/payments/:pid/verify', canManageDues, (req, res) => {
     db.prepare("UPDATE dues SET status = 'paid' WHERE id = ?").run(payment.due_id);
   });
   tx();
+  // Final receipt email + record.
+  const verifiedPayment = db.prepare('SELECT * FROM payments WHERE id = ?').get(payment.id);
+  if (sendReceipt(verifiedPayment, due, resident, false)) {
+    db.prepare("UPDATE payments SET receipt_at = datetime('now') WHERE id = ?").run(payment.id);
+  }
+  notifyUsers([payment.user_id], {
+    type: 'payment',
+    title: 'Payment verified — receipt sent',
+    body: `${due.period_label} · ₹${due.amount} confirmed by the society office.`,
+    link: '/dues',
+  });
   logAudit({ actor: req.user, action: 'payment_verify', targetType: 'payment', targetId: payment.id, detail: `UTR ${payment.utr_reference}` });
-  res.json({ message: 'Payment verified — due marked paid' });
+  res.json({ message: 'Payment verified — final receipt sent, due marked paid' });
 });
 
 router.post('/payments/:pid/reject', canManageDues, (req, res) => {
@@ -160,6 +374,12 @@ router.post('/payments/:pid/reject', canManageDues, (req, res) => {
     db.prepare('UPDATE dues SET status = ? WHERE id = ?').run(backTo, payment.due_id);
   });
   tx();
+  notifyUsers([payment.user_id], {
+    type: 'payment',
+    title: 'Payment could not be verified',
+    body: `${due.period_label}: please re-submit a valid payment.`,
+    link: '/dues',
+  });
   logAudit({ actor: req.user, action: 'payment_reject', targetType: 'payment', targetId: payment.id, detail: `UTR ${payment.utr_reference}` });
   res.json({ message: 'Payment rejected — resident can resubmit' });
 });
