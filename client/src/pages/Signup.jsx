@@ -6,7 +6,7 @@ import { useAuth } from '../auth';
 import { Btn, Field, PasswordInput } from '../components/Glass';
 import BlockHousePicker from '../components/BlockHousePicker';
 import OAuthButtons from '../components/OAuthButtons';
-import { OFFICE_BEARER_ROLES } from '../constants';
+import { OFFICE_BEARER_ROLES, capitalizeName } from '../constants';
 
 const RESEND_COOLDOWN = 60; // seconds — mirrors the server-side resend gate
 
@@ -40,6 +40,7 @@ export default function Signup() {
     name: '',
     phone: '',
     email: '',
+    resident_status: '',
     block: '',
     house_no: '',
     role_detail: '',
@@ -56,10 +57,14 @@ export default function Signup() {
   const isResident = form.account_type === 'resident';
   const isOfficeBearer = form.account_type === 'office_bearer';
 
-  // Progressive reveal: Account type + Name → (Block/House for residents, or
-  // Committee post for office bearers) → email/phone/password.
+  // Progressive reveal: Account type + Name → (status + Block/House for
+  // residents, or Committee post for office bearers) → email/phone/password.
   const named = form.name.trim().length > 0;
-  const midComplete = isResident ? !!form.block && !!form.house_no : isOfficeBearer ? !!form.role_detail : true;
+  const midComplete = isResident
+    ? !!form.resident_status && !!form.block && !!form.house_no
+    : isOfficeBearer
+    ? !!form.role_detail
+    : true;
   const showRest = named && midComplete;
 
   // Tick down the resend cooldown once per second.
@@ -72,7 +77,7 @@ export default function Signup() {
   function changeType(e) {
     const account_type = e.target.value;
     // Clear the fields that don't apply to the newly-chosen type.
-    setForm((f) => ({ ...f, account_type, block: '', house_no: '', role_detail: '' }));
+    setForm((f) => ({ ...f, account_type, resident_status: '', block: '', house_no: '', role_detail: '' }));
     setError('');
   }
 
@@ -89,6 +94,7 @@ export default function Signup() {
             name: form.name,
             phone: form.phone,
             email: form.email,
+            resident_status: form.resident_status,
             block: form.block,
             house_no: form.house_no,
             password: form.password,
@@ -291,15 +297,24 @@ export default function Signup() {
           )}
 
           <Field label="FULL NAME">
-            <input className="input" value={form.name} onChange={set('name')} placeholder="Your name" required autoFocus />
+            <input
+              className="input"
+              value={form.name}
+              onChange={(e) => setForm((f) => ({ ...f, name: capitalizeName(e.target.value) }))}
+              placeholder="Your name"
+              required
+              autoFocus
+            />
           </Field>
 
           <AnimatePresence>
             {named && isResident && (
               <Reveal key="location">
                 <BlockHousePicker
+                  status={form.resident_status}
                   block={form.block}
                   houseNo={form.house_no}
+                  onStatusChange={(v) => setForm((f) => ({ ...f, resident_status: v }))}
                   onBlockChange={(v) => setForm((f) => ({ ...f, block: v }))}
                   onHouseNoChange={(v) => setForm((f) => ({ ...f, house_no: v }))}
                 />

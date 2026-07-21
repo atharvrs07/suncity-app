@@ -313,6 +313,73 @@ A new top role plus a granular permission model and a full activity log.
   integration checks (super-admin login/secrecy/shield, staff signup→approve-with-permissions,
   permission enforcement, permission edit, delete-with-reassignment, audit log). Client build clean.
 
+## Owner/Resident status, per-house lock, name casing, SN Pro font (added 2026-07-21)
+
+- **Owner vs Resident status** — every resident account is either the flat's
+  **Owner** or its living-in **Resident**. Source of truth is `RESIDENT_STATUSES`
+  in `server/config.js` (`['owner','resident']`), mirrored with labels in
+  `client/src/constants.js`. Stored as the new nullable `users.resident_status`
+  column (+ `signup_otps.resident_status`), added by the idempotent
+  `migrateResidentStatus()` in `db.js`. Required on manual signup, OAuth
+  complete-profile, and validated server-side in `/api/auth/signup`,
+  `/verify-signup`, `/oauth/complete`. Shown on the admin Users list (👤 Owner /
+  Resident) and editable in Admin → Users.
+- **One Owner + one Resident per house (house-slot lock)** — a house holds at most
+  one of each status. Enforced by a **partial unique index**
+  `idx_users_house_slot ON users(block, house_no, resident_status)
+  WHERE role='resident' AND …NOT NULL` (the atomic race backstop; NULLs are
+  distinct so legacy statusless residents never collide, and promoting a resident
+  away frees the slot). Routes also do a friendly pre-check (`houseSlotTaken` in
+  `routes/auth.js`; inline in `routes/users.js` for admin edits, excluding the
+  edited user's own slot) returning 409 before insert. **UI**: new public
+  `GET /api/meta/house-occupancy` reports which slots are filled (occupancy only,
+  no identity); `client/src/houseNumbers.js` `useHouseOccupancy()` fetches it fresh
+  (not cached). `BlockHousePicker.jsx` now renders **Resident Status → Block →
+  House No.**: House No. is disabled until both a status and block are chosen, and
+  houses whose chosen-status slot (or both slots) are taken are shown but greyed
+  out. Admin edit passes `ignore` (the account's own slot) so an unchanged re-save
+  passes, and `statusRequired={false}` so unrelated edits of legacy residents
+  aren't blocked. Signup staged reveal now gates on status+block+house.
+- **Live name title-casing** — `capitalizeName()` in `constants.js` capitalizes the
+  first letter of every word as the user types (length-preserving, so the caret
+  never jumps; intentional caps like "McArthur" survive). Applied to the full-name
+  inputs on Signup, OAuth complete-profile, Admin → Users edit, and Settings.
+- **Watermark** — `components/Watermark.jsx` text is now **"Designed & Developed by
+  Adarsh Sharma | 25 Carat Ventures"** (still hidden for the super_admin).
+- **Global font → SN Pro** — the Google-Fonts `<link>` in `client/index.html` and
+  the `body` `font-family` in `styles.css` now load **SN Pro** (variable weights
+  400–800) in place of Inter. It's a genuine Google Fonts family
+  (`fonts.google.com/specimen/SN+Pro`).
+- Verified 2026-07-21: fresh migration on the existing DB (columns + slot index,
+  0 FK violations); unique-index rejects a 2nd owner/2nd resident while allowing one
+  of each; occupancy endpoint + server boot OK; client build clean; SN Pro CSS
+  returns 200. Sections 1–5 of the request (dependent House No., staged signup,
+  disposable-email/MX OTP, complaint image upload, Lost & Found) were already built
+  earlier and were re-confirmed present, not rebuilt.
+
+## Installable PWA — standalone home-screen launch (added 2026-07-21)
+
+Added to the home screen on mobile, the app now launches **standalone** (no browser
+address bar / chrome), like a native app.
+
+- `client/public/manifest.webmanifest` — `display: standalone`, `start_url`/`scope`
+  `/`, name/short_name, theme+background `#eaf1ff`, and PNG icons (192, 512, plus a
+  512 **maskable** with safe-zone padding for Android's adaptive shapes). Linked from
+  `client/index.html`.
+- **iOS** ignores the manifest's display mode, so `index.html` also carries
+  `apple-mobile-web-app-capable` / `mobile-web-app-capable` = yes, a status-bar-style,
+  an `apple-mobile-web-app-title`, and an opaque 180×180 `apple-touch-icon.png`.
+- **Icons**: generated from `imgs/logo.png` (2048², 5.2 MB — far too heavy to ship as
+  an icon) into `client/public/imgs/icon-{192,512}.png`, `icon-maskable-512.png`,
+  `apple-touch-icon.png` (all ≤ ~470 KB). The favicon + apple-touch links now point at
+  these instead of the giant logo. logo.png is still used for the in-app brand/auth
+  headers (unchanged). Icons were produced with `sharp` run transiently from the
+  scratchpad — it is NOT a project dependency; re-run only if the logo changes.
+- Served by the existing `express.static(client/dist)` (before the SPA catch-all), so
+  `/manifest.webmanifest` (Content-Type `application/manifest+json`) and `/imgs/*`
+  resolve directly. Verified 2026-07-21: build emits all assets, endpoints return 200
+  with correct types.
+
 ## Key invariants (enforce on any change)
 
 - **RBAC lives on the API**, not just the UI. Roles: super_admin (hidden, all-powerful),
@@ -345,4 +412,5 @@ A new top role plus a granular permission model and a full activity log.
 - Audit-log pagination + date filtering (currently caps at 250 newest, text search only)
 - Complaint comments/updates thread; notice editing
 - Pagination for large lists (dues admin list currently caps at 500)
-- PWA manifest + installability polish
+- PWA offline support (service worker / caching) — the manifest + standalone launch
+  are done; there's no service worker yet, so no offline mode or install prompt event.

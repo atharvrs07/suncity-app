@@ -8,7 +8,7 @@ export default function Watermark() {
   if (user && user.role === 'super_admin') return null;
   return (
     <div className="app-watermark" aria-hidden="true">
-      Developed by Adarsh Sharma&nbsp;|&nbsp;25 Carat Ventures
+      Designed &amp; Developed by Adarsh Sharma&nbsp;|&nbsp;25 Carat Ventures
     </div>
   );
 }

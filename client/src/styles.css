@@ -31,7 +31,7 @@ body,
 
 body {
   margin: 0;
-  font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  font-family: 'SN Pro', system-ui, -apple-system, 'Segoe UI', sans-serif;
   color: var(--ink);
   background: linear-gradient(160deg, #e8f0ff 0%, #f3ecff 45%, #fff0e6 100%);
   background-attachment: fixed;

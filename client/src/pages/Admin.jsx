@@ -3,7 +3,16 @@ import { api, fmtMoney, fmtDateTime } from '../api';
 import { useFetch } from '../hooks';
 import { useAuth } from '../auth';
 import { GlassCard, Btn, Chip, Field, Toggle, Sheet, Segmented, Empty, Spinner, StaggerList, StaggerItem, PasswordInput } from '../components/Glass';
-import { roleLabel, BLOCKS, OFFICE_BEARER_ROLES, OFFICE_BEARER_PERMISSIONS, SUPERVISOR_ROLES, permLabel } from '../constants';
+import {
+  roleLabel,
+  BLOCKS,
+  OFFICE_BEARER_ROLES,
+  OFFICE_BEARER_PERMISSIONS,
+  SUPERVISOR_ROLES,
+  permLabel,
+  residentStatusLabel,
+  capitalizeName,
+} from '../constants';
 import BlockHousePicker from '../components/BlockHousePicker';
 
 // Roles an admin may assign from the editor (mirrors the server's ASSIGNABLE_ROLES).
@@ -220,7 +229,7 @@ function AutomationsTab() {
   );
 }
 
-const emptyEdit = { name: '', phone: '', email: '', block: '', house_no: '', role: 'resident', role_detail: '', permissions: [], password: '' };
+const emptyEdit = { name: '', phone: '', email: '', resident_status: '', block: '', house_no: '', role: 'resident', role_detail: '', permissions: [], password: '' };
 
 function UsersTab() {
   const { user: me } = useAuth();
@@ -270,6 +279,7 @@ function UsersTab() {
       name: u.name || '',
       phone: u.phone || '',
       email: u.email || '',
+      resident_status: u.resident_status || '',
       block: u.block || '',
       house_no: u.house_no || '',
       role: u.role,
@@ -299,7 +309,7 @@ function UsersTab() {
       if ((form[k] || '') !== (editing[k] || '')) body[k] = form[k];
     }
     if (form.role === 'resident') {
-      for (const k of ['block', 'house_no']) {
+      for (const k of ['block', 'house_no', 'resident_status']) {
         if ((form[k] || '') !== (editing[k] || '')) body[k] = form[k];
       }
     }
@@ -396,6 +406,7 @@ function UsersTab() {
                   {u.email ? ` · ✉️ ${u.email}` : ''}
                   {u.block ? ` · 🏢 ${u.block}` : ''}
                   {u.flat_no ? ` · Flat ${u.flat_no}` : ''}
+                  {u.resident_status ? ` · 👤 ${residentStatusLabel(u.resident_status)}` : ''}
                 </p>
                 {u.role === 'office_bearer' && (
                   <p className="tiny" style={{ marginTop: 5 }}>
@@ -437,7 +448,7 @@ function UsersTab() {
                 <input
                   className="input"
                   value={form.name}
-                  onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
+                  onChange={(e) => setForm((f) => ({ ...f, name: capitalizeName(e.target.value) }))}
                   required
                 />
               </Field>
@@ -545,13 +556,18 @@ function UsersTab() {
                 </Field>
               )}
 
-              {/* Block/house apply to residents; other roles have no society flat. */}
+              {/* Status/block/house apply to residents; other roles have no society flat.
+                  `ignore` keeps this resident's own current slot selectable. */}
               {form.role === 'resident' && (
                 <BlockHousePicker
+                  status={form.resident_status}
                   block={form.block}
                   houseNo={form.house_no}
+                  onStatusChange={(v) => setForm((f) => ({ ...f, resident_status: v }))}
                   onBlockChange={(v) => setForm((f) => ({ ...f, block: v }))}
                   onHouseNoChange={(v) => setForm((f) => ({ ...f, house_no: v }))}
+                  ignore={{ block: editing.block, houseNo: editing.house_no, status: editing.resident_status }}
+                  statusRequired={false}
                 />
               )}
               <Field label="SET NEW PASSWORD (OPTIONAL)">

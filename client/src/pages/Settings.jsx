@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { api } from '../api';
 import { useAuth } from '../auth';
 import { GlassCard, Btn, Chip, Field, PasswordInput } from '../components/Glass';
-import { roleLabel } from '../constants';
+import { roleLabel, capitalizeName } from '../constants';
 
 export default function Settings() {
   const { user, setUser, logout } = useAuth();
@@ -70,7 +70,7 @@ export default function Settings() {
               <input
                 className="input"
                 value={profile.name}
-                onChange={(e) => setProfile((f) => ({ ...f, name: e.target.value }))}
+                onChange={(e) => setProfile((f) => ({ ...f, name: capitalizeName(e.target.value) }))}
                 required
               />
             </Field>

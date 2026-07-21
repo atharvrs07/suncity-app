@@ -5,6 +5,7 @@ import { api } from '../api';
 import { useAuth } from '../auth';
 import { Btn, Field, Spinner } from '../components/Glass';
 import BlockHousePicker from '../components/BlockHousePicker';
+import { capitalizeName } from '../constants';
 
 // Landing route for the server-side OAuth flow. The server bounces the browser
 // here with the outcome in the URL fragment:
@@ -24,7 +25,7 @@ export default function OAuthCallback() {
   const [mode, setMode] = useState('loading'); // 'loading' | 'complete' | 'error'
   const [error, setError] = useState('');
   const [prefillEmail, setPrefillEmail] = useState('');
-  const [form, setForm] = useState({ name: '', phone: '', block: '', house_no: '' });
+  const [form, setForm] = useState({ name: '', phone: '', resident_status: '', block: '', house_no: '' });
   const [busy, setBusy] = useState(false);
   const pendingToken = useRef(null);
 
@@ -131,7 +132,13 @@ export default function OAuthCallback() {
         {error && <div className="err-banner">{error}</div>}
         <form onSubmit={submit}>
           <Field label="FULL NAME">
-            <input className="input" value={form.name} onChange={set('name')} placeholder="Your name" required />
+            <input
+              className="input"
+              value={form.name}
+              onChange={(e) => setForm((f) => ({ ...f, name: capitalizeName(e.target.value) }))}
+              placeholder="Your name"
+              required
+            />
           </Field>
           <Field label="PHONE NUMBER">
             <input
@@ -145,8 +152,10 @@ export default function OAuthCallback() {
             />
           </Field>
           <BlockHousePicker
+            status={form.resident_status}
             block={form.block}
             houseNo={form.house_no}
+            onStatusChange={(v) => setForm((f) => ({ ...f, resident_status: v }))}
             onBlockChange={(v) => setForm((f) => ({ ...f, block: v }))}
             onHouseNoChange={(v) => setForm((f) => ({ ...f, house_no: v }))}
           />

@@ -39,3 +39,25 @@ export function useHouseNumbers() {
   }, []);
   return map;
 }
+
+// Which house slots are already registered: { [block]: { [houseNo]: { owner,
+// resident } } }. Deliberately NOT cached at module scope (unlike the static
+// house-number map) so the greying reflects the latest registrations each time a
+// signup / edit form mounts. Returns null while loading, then the taken map.
+export function useHouseOccupancy() {
+  const [taken, setTaken] = useState(null);
+  useEffect(() => {
+    let live = true;
+    api('/api/meta/house-occupancy')
+      .then((d) => {
+        if (live) setTaken(d.taken || {});
+      })
+      .catch(() => {
+        if (live) setTaken({}); // greying is a nicety; the server still enforces the lock
+      });
+    return () => {
+      live = false;
+    };
+  }, []);
+  return taken;
+}

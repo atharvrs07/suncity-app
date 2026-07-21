@@ -103,6 +103,25 @@ export function hasPerm(user, perm) {
   return false;
 }
 
+// A resident account is either the flat's Owner or its (living-in) Resident.
+// Mirrors server/config.js RESIDENT_STATUSES (keep the two in sync).
+export const RESIDENT_STATUSES = [
+  { value: 'owner', label: 'Owner' },
+  { value: 'resident', label: 'Resident' },
+];
+
+export const residentStatusLabel = (value) => {
+  const s = RESIDENT_STATUSES.find((x) => x.value === value);
+  return s ? s.label : '';
+};
+
+// Live "title case" for full-name inputs: capitalize the first letter of every
+// word (the first char and any letter following whitespace) as the user types,
+// leaving the rest untouched so intentional caps like "McArthur" survive. The
+// replacement is length-preserving, so the caret never jumps mid-edit.
+export const capitalizeName = (value) =>
+  String(value == null ? '' : value).replace(/(^|\s)(\p{L})/gu, (_, sep, ch) => sep + ch.toUpperCase());
+
 // Society blocks — mirrors server/config.js BLOCKS (keep the two in sync).
 // Order is intentional and shown as-is in the signup / profile dropdowns.
 export const BLOCKS = [
