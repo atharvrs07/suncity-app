@@ -3,7 +3,6 @@ import { useTranslation } from 'react-i18next';
 import { api, fmtDate, fmtDateTime } from '../api';
 import { useAuth } from '../auth';
 import { useTheme } from '../theme';
-import { setLanguage, LANGUAGES } from '../i18n';
 import { GlassCard, Btn, Chip, Field, PasswordInput, Segmented } from '../components/Glass';
 import Avatar from '../components/Avatar';
 import { roleLabel, capitalizeName } from '../constants';
@@ -18,7 +17,7 @@ function fmtDuration(sec) {
 
 export default function Settings() {
   const { user, setUser, logout } = useAuth();
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const { theme, setTheme } = useTheme();
   const [profile, setProfile] = useState({ name: user.name, flat_no: user.flat_no || '', email: user.email || '' });
   const [pwd, setPwd] = useState({ current_password: '', new_password: '' });
@@ -91,10 +90,6 @@ export default function Settings() {
     }
   }
 
-  const changeLang = (code) => {
-    setLanguage(code);
-  };
-
   return (
     <>
       <div className="page-head">
@@ -134,7 +129,7 @@ export default function Settings() {
           </div>
         </GlassCard>
 
-        {/* Appearance (item 5) + Language (item 6) */}
+        {/* Appearance (item 5). Language now lives in the header (item 6). */}
         <GlassCard>
           <div className="title-sm" style={{ marginBottom: 8 }}>🎨 {t('settings.appearance')}</div>
           <Segmented
@@ -145,12 +140,9 @@ export default function Settings() {
             value={theme}
             onChange={setTheme}
           />
-          <div className="title-sm" style={{ margin: '16px 0 8px' }}>🌐 {t('settings.language')}</div>
-          <Segmented
-            options={LANGUAGES.map((l) => ({ value: l.code, label: l.label }))}
-            value={i18n.language}
-            onChange={changeLang}
-          />
+          <p className="tiny" style={{ marginTop: 10 }}>
+            🌐 {t('settings.language')} — use the Eng / Hin selector in the top bar.
+          </p>
         </GlassCard>
 
         {/* Profile details */}

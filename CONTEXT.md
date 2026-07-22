@@ -461,6 +461,48 @@ A large multi-feature batch. New shared infra + per-module wiring:
   notice fan-out, complaint routing (electrical→maintenance), payment submit/verify
   (final receipt), resolve→closed auto-transition. Client build clean.
 
+## Real UPI assets, notification fix, calendar/time slots, header language (added 2026-07-22)
+
+Follow-up fix/feature pass on the feature batch above.
+
+- **Real society UPI QR + VPA (item 1)** — the provided "Suncity UPI" payment card
+  (`Suncity UPI.jpeg` at the project root) is a real signed **barodampay merchant QR**.
+  The QR square was cropped once into `client/public/imgs/payment-qr.png` (verified to
+  decode to `upi://pay?pa=sunci94122025@barodampay&pn=SUNCITY%20VISTAAR%20JANKALYAN%20SAMITI…`
+  incl. its merchant `sign=` — so a regenerated `upi://pay` QR is NOT equivalent; the image
+  must be used as-is). VPA/payee/QR-path defaults now live in `config.js`
+  (`UPI_VPA`/`UPI_PAYEE`/`UPI_QR_IMAGE`) + `.env(.example)` and seed `app_settings`.
+  `migratePaymentDefaults()` in `db.js` upgrades any DB still holding the old placeholders
+  (`society@upi` / `My Suncity Vistaar` / blank QR) to the real values, leaving admin-set
+  values untouched. `PaymentQR` shows the real image on Home; the Dues **Pay** sheet (an
+  `amount` is passed) still generates a dynamic pre-filled UPI QR to the real VPA.
+- **Notification panel rebuilt (item 2)** — `NotificationBell` is now a self-contained
+  overlay portalled to `<body>`: the bell **toggles** it, an outside click closes it (a
+  full-screen overlay catches the click), Escape closes it, and there's a visible **✕**.
+  Desktop = a dropdown anchored under the bell (measured via `getBoundingClientRect`, kept
+  glued on resize/scroll); phones (`useIsMobile`, ≤640px) = a bottom sheet with grab handle +
+  ✕. CSS: `.notif-overlay/.notif-panel(.pop-mode/.sheet-mode)/.notif-head/.notif-close/.notif-list`.
+- **Events time slots (items 3/4)** — new nullable `events.event_time` (`HH:MM`, guarded ADD
+  COLUMN + base schema; validated in `routes/events.js` on POST/PATCH). Multiple events can
+  share a date at different times (distinct rows). `Events.jsx` form has a date+time row;
+  cards + calendar show the time (`fmtTime` in `api.js`).
+- **Calendar interaction (item 3)** — `EventsCalendar` tab order is **Past then Upcoming**.
+  Any day with events (past or future) is bold with a dot; tapping it opens a **bottom sheet**
+  (`Glass.Sheet`) listing that day's events **chronologically** with their times (untimed →
+  "All day", sorted last). The Past/Upcoming toggle still filters the list below.
+- **Header language selector (item 6)** — moved out of Settings into the topbar as an always-
+  visible `LanguageSelector` pill showing **Eng/Hin**. Tapping opens a **platform-native**
+  picker via `client/src/platform.js` `getPlatform()` (user-agent based, incl. iPadOS-desktop-UA
+  quirk): **iOS** = liquid-glass action sheet (grouped card + separate Cancel); **Android** =
+  Material bottom sheet; **desktop/other** = anchored dropdown. CSS: `.lang-btn`, `.lang-overlay`,
+  `.lang-menu`, `.lang-ios-*`, `.lang-android-*`, `.lang-opt*`.
+- Verified 2026-07-22: fresh boot ran both migrations (event_time added, payment defaults
+  upgraded); upi-config returns the real VPA + `/imgs/payment-qr.png` (served 200, image/png);
+  two same-date events at 07:00/18:30 saved + list chronologically; invalid times 400; QR
+  decodes to the real signed string. Playwright screenshots on desktop + iPhone + Pixel
+  confirmed: notification dropdown/sheet open & close cleanly, day sheet with times, real QR +
+  VPA on a resident Home, and the three platform-specific language pickers. Client build clean.
+
 ## Key invariants (enforce on any change)
 
 - **RBAC lives on the API**, not just the UI. Roles: super_admin (hidden, all-powerful),

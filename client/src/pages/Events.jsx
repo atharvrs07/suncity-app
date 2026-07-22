@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react';
-import { api, fmtDate, fmtDateTime } from '../api';
+import { api, fmtDate, fmtDateTime, fmtTime } from '../api';
 import { useFetch } from '../hooks';
 import { useAuth } from '../auth';
 import { GlassCard, Btn, Chip, Field, Sheet, Empty, Spinner, StaggerList, StaggerItem } from '../components/Glass';
 import EventsCalendar from '../components/EventsCalendar';
 
-const EMPTY = { heading: '', details: '', event_date: '', photo: null };
+const EMPTY = { heading: '', details: '', event_date: '', event_time: '', photo: null };
 
 export default function Events() {
   const { user } = useAuth();
@@ -25,7 +25,7 @@ export default function Events() {
     setSheet({ mode: 'new' });
   };
   const openEdit = (ev) => {
-    setForm({ heading: ev.heading, details: ev.details || '', event_date: ev.event_date || '', photo: null });
+    setForm({ heading: ev.heading, details: ev.details || '', event_date: ev.event_date || '', event_time: ev.event_time || '', photo: null });
     setError('');
     setSheet({ mode: 'edit', ev });
   };
@@ -39,6 +39,7 @@ export default function Events() {
       fd.append('heading', form.heading);
       fd.append('details', form.details);
       fd.append('event_date', form.event_date || '');
+      fd.append('event_time', form.event_time || '');
       if (form.photo) fd.append('photo', form.photo);
       if (sheet.mode === 'edit') {
         await api(`/api/events/${sheet.ev.id}`, { method: 'PATCH', form: fd });
@@ -103,6 +104,7 @@ export default function Events() {
                       <Chip tone={upcoming ? 'purple' : 'gray'}>
                         {upcoming ? '🗓️ ' : ''}
                         {fmtDate(ev.event_date)}
+                        {ev.event_time ? ` · ${fmtTime(ev.event_time)}` : ''}
                       </Chip>
                     )}
                   </div>
@@ -148,14 +150,27 @@ export default function Events() {
               onChange={(e) => setForm((f) => ({ ...f, details: e.target.value }))}
             />
           </Field>
-          <Field label="EVENT DATE (OPTIONAL)">
-            <input
-              className="input"
-              type="date"
-              value={form.event_date}
-              onChange={(e) => setForm((f) => ({ ...f, event_date: e.target.value }))}
-            />
-          </Field>
+          <div className="grid-2">
+            <Field label="EVENT DATE (OPTIONAL)">
+              <input
+                className="input"
+                type="date"
+                value={form.event_date}
+                onChange={(e) => setForm((f) => ({ ...f, event_date: e.target.value }))}
+              />
+            </Field>
+            <Field label="TIME (OPTIONAL)">
+              <input
+                className="input"
+                type="time"
+                value={form.event_time}
+                onChange={(e) => setForm((f) => ({ ...f, event_time: e.target.value }))}
+              />
+            </Field>
+          </div>
+          <span className="tiny" style={{ display: 'block', marginTop: -6, marginBottom: 8 }}>
+            Add a time to run several events on the same day (e.g. 10:00 AM and 6:00 PM).
+          </span>
           <Field label={sheet && sheet.mode === 'edit' ? 'REPLACE PHOTO (OPTIONAL)' : 'PHOTO (OPTIONAL)'}>
             <input
               className="input"

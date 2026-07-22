@@ -145,6 +145,7 @@ CREATE TABLE IF NOT EXISTS events (
   details TEXT,
   photo TEXT,
   event_date TEXT,
+  event_time TEXT,
   posted_by INTEGER NOT NULL REFERENCES users(id),
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -442,6 +443,7 @@ function migrateFeatureBatch2026() {
   add('users', 'last_active_at', 'last_active_at TEXT');
   add('users', 'last_login_at', 'last_login_at TEXT');
   add('users', 'login_count', 'login_count INTEGER NOT NULL DEFAULT 0');
+  add('events', 'event_time', 'event_time TEXT'); // optional HH:MM slot (multiple events per date)
   add('complaints', 'assigned_role', 'assigned_role TEXT');
   add('gallery_photos', 'source_event_id', 'source_event_id INTEGER');
   add('due_automations', 'block_amounts', 'block_amounts TEXT');
@@ -463,9 +465,29 @@ function seedSettings() {
   const upsert = db.prepare('INSERT OR IGNORE INTO app_settings (key, value) VALUES (?, ?)');
   upsert.run('upi_vpa', cfg.UPI_VPA);
   upsert.run('upi_payee', cfg.UPI_PAYEE);
-  upsert.run('payment_qr_image', ''); // admin uploads the provided QR here later
+  upsert.run('payment_qr_image', cfg.UPI_QR_IMAGE); // bundled signed merchant QR; admin can override in Control Panel
 }
 seedSettings();
+
+// One-time upgrade of the old placeholder payment settings to the real society
+// UPI details. Only touches values still holding a known placeholder / blank, so
+// anything an admin deliberately set in the Control Panel is left untouched.
+function migratePaymentDefaults() {
+  const get = db.prepare('SELECT value FROM app_settings WHERE key = ?');
+  const set = db.prepare(
+    `INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, datetime('now'))
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`
+  );
+  const upgrade = (key, placeholders, real) => {
+    const row = get.get(key);
+    const cur = row ? row.value : null;
+    if (cur == null || placeholders.includes(cur.trim())) set.run(key, real);
+  };
+  upgrade('upi_vpa', ['', 'society@upi'], cfg.UPI_VPA);
+  upgrade('upi_payee', ['', 'My Suncity Vistaar'], cfg.UPI_PAYEE);
+  upgrade('payment_qr_image', [''], cfg.UPI_QR_IMAGE);
+}
+migratePaymentDefaults();
 
 // The approval chain must never get stuck with zero admins: whenever no
 // approved admin exists, create (or promote) the fallback admin from env.

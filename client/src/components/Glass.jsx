@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 
 export function GlassCard({ children, className = '', onClick, ...rest }) {
@@ -86,7 +87,10 @@ export function Segmented({ options, value, onChange }) {
 }
 
 export function Sheet({ open, onClose, title, children }) {
-  return (
+  // Portal to <body> so the fixed-position sheet is viewport-relative even when
+  // it's mounted inside an ancestor with backdrop-filter/transform (e.g. the
+  // topbar), which would otherwise become its containing block and clip it.
+  return createPortal(
     <AnimatePresence>
       {open && (
         <>
@@ -110,7 +114,8 @@ export function Sheet({ open, onClose, title, children }) {
           </motion.div>
         </>
       )}
-    </AnimatePresence>
+    </AnimatePresence>,
+    document.body
   );
 }
 
