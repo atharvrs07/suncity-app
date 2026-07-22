@@ -24,12 +24,20 @@ export default function PaymentQR({ amount, tr, compact = false }) {
       .then(async (c) => {
         if (!live) return;
         setCfg(c);
-        if (c.qr_image) {
+        // For a specific due (Pay sheet) generate a dynamic UPI QR to the real
+        // VPA with the amount/ref pre-filled. Otherwise show the society's
+        // official signed merchant QR image (item 1) — a regenerated QR would
+        // drop its merchant signature.
+        if (amount && c.vpa) {
+          const uri = `upi://pay?pa=${encodeURIComponent(c.vpa)}&pn=${encodeURIComponent(c.payee_name || '')}&am=${amount}${
+            tr ? `&tr=${tr}` : ''
+          }&cu=INR`;
+          const url = await QRCode.toDataURL(uri, { width: 320, margin: 2 });
+          if (live) setQrData(url);
+        } else if (c.qr_image) {
           setQrData(c.qr_image); // society-provided image (already a URL)
         } else if (c.vpa) {
-          const uri = `upi://pay?pa=${encodeURIComponent(c.vpa)}&pn=${encodeURIComponent(c.payee_name || '')}${
-            amount ? `&am=${amount}` : ''
-          }${tr ? `&tr=${tr}` : ''}&cu=INR`;
+          const uri = `upi://pay?pa=${encodeURIComponent(c.vpa)}&pn=${encodeURIComponent(c.payee_name || '')}&cu=INR`;
           const url = await QRCode.toDataURL(uri, { width: 320, margin: 2 });
           if (live) setQrData(url);
         }

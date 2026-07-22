@@ -141,8 +141,12 @@ module.exports = {
     user: process.env.GMAIL_USER || 'suncityvistaar2000@gmail.com',
     appPassword: process.env.GMAIL_APP_PASSWORD || '', // empty → emails are logged to console instead
   },
-  UPI_VPA: process.env.SOCIETY_UPI_VPA || 'society@upi',
-  UPI_PAYEE: process.env.SOCIETY_UPI_PAYEE_NAME || 'My Suncity Vistaar',
+  // Real society UPI details (extracted once from the provided "Suncity UPI"
+  // payment card and kept here so they're not hardcoded loosely elsewhere). The
+  // matching signed merchant QR image ships as client/public/imgs/payment-qr.png.
+  UPI_VPA: process.env.SOCIETY_UPI_VPA || 'sunci94122025@barodampay',
+  UPI_PAYEE: process.env.SOCIETY_UPI_PAYEE_NAME || 'SUNCITY VISTAAR JANKALYAN SAMITI',
+  UPI_QR_IMAGE: process.env.SOCIETY_UPI_QR_IMAGE || '/imgs/payment-qr.png',
   // Google Gemini — powers the AI-assisted payment-screenshot check (item 22) and
   // is exposed as a reusable service in server/lib/gemini.js. Blank key → the
   // integration reports "not configured" and AI checks are skipped gracefully.

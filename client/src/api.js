@@ -41,6 +41,15 @@ export function fmtDateTime(s) {
   return d.toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
 }
 
+// "HH:MM" (24h) → "9:30 AM". Empty/invalid returns ''. Used for event time slots.
+export function fmtTime(s) {
+  if (!s || !/^\d{2}:\d{2}$/.test(s)) return '';
+  const [h, m] = s.split(':').map(Number);
+  const ap = h < 12 ? 'AM' : 'PM';
+  const h12 = h % 12 === 0 ? 12 : h % 12;
+  return `${h12}:${String(m).padStart(2, '0')} ${ap}`;
+}
+
 export const todayStr = () => {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;

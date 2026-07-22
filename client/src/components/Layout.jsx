@@ -8,6 +8,7 @@ import { Btn } from './Glass';
 import Avatar from './Avatar';
 import NotificationBell from './NotificationBell';
 import ThemeToggle from './ThemeToggle';
+import LanguageSelector from './LanguageSelector';
 
 export default function Layout() {
   const { user, logout } = useAuth();
@@ -29,6 +30,7 @@ export default function Layout() {
         </button>
         <div className="topbar-title">{current ? label(current) : t('brand.app')}</div>
         <div className="topbar-actions">
+          <LanguageSelector />
           <NotificationBell />
           <ThemeToggle />
           <NavLink to="/settings" aria-label={t('nav.settings')}>
