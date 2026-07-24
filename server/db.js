@@ -73,6 +73,7 @@ CREATE TABLE IF NOT EXISTS dues (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER NOT NULL REFERENCES users(id),
   amount REAL NOT NULL,
+  amount_paid REAL NOT NULL DEFAULT 0,
   period_label TEXT NOT NULL,
   period_key TEXT,
   due_date TEXT NOT NULL,
@@ -97,11 +98,25 @@ CREATE TABLE IF NOT EXISTS payments (
   ai_checked_at TEXT,
   provisional_receipt_at TEXT,
   receipt_at TEXT,
-  status TEXT NOT NULL DEFAULT 'submitted' CHECK (status IN ('submitted','verified','rejected')),
+  status TEXT NOT NULL DEFAULT 'submitted' CHECK (status IN ('submitted','verified','rejected','duplicate')),
   reviewed_by INTEGER,
   reviewed_at TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- A payment can be auto-mapped against several outstanding dues, oldest-first
+-- (fully covering the oldest, then the next, a final one possibly partial). One
+-- row per (payment, due) records how much of the payment was applied to that
+-- due — the source of truth for the itemized receipt and for rollback on reject.
+CREATE TABLE IF NOT EXISTS payment_allocations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  payment_id INTEGER NOT NULL REFERENCES payments(id),
+  due_id INTEGER NOT NULL REFERENCES dues(id),
+  amount REAL NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_payment_alloc_payment ON payment_allocations (payment_id);
+CREATE INDEX IF NOT EXISTS idx_payment_alloc_due ON payment_allocations (due_id);
 
 CREATE TABLE IF NOT EXISTS due_extensions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -456,8 +471,66 @@ function migrateFeatureBatch2026() {
   add('payments', 'ai_checked_at', 'ai_checked_at TEXT');
   add('payments', 'provisional_receipt_at', 'provisional_receipt_at TEXT');
   add('payments', 'receipt_at', 'receipt_at TEXT');
+  // Oldest-first payment mapping + partial payments (2026-07 batch): dues track
+  // how much has been paid so far (a due is fully paid when amount_paid >= amount;
+  // 0 < amount_paid < amount is a partial payment). NOT NULL DEFAULT 0 is allowed
+  // in ADD COLUMN. The payment_allocations table itself comes from CREATE TABLE
+  // IF NOT EXISTS above.
+  add('dues', 'amount_paid', 'amount_paid REAL NOT NULL DEFAULT 0');
 }
 migrateFeatureBatch2026();
+
+// Migration for DBs created before payment submissions could be flagged as a
+// system-wide duplicate. The payments.status list is a CHECK constraint, which
+// SQLite can only widen via a table rebuild. Guarded on the stored CREATE TABLE
+// text so it runs at most once (and not on a fresh DB, whose base schema already
+// lists 'duplicate'). Runs AFTER migrateFeatureBatch2026 so every AI column the
+// copy references already exists.
+function migratePaymentsDuplicateStatus() {
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='payments'").get();
+  if (row && row.sql && row.sql.includes("'duplicate'")) return;
+  console.log('[migrate] Rebuilding payments table to add the duplicate status…');
+  db.pragma('foreign_keys = OFF');
+  db.transaction(() => {
+    db.exec(`
+      CREATE TABLE payments_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        due_id INTEGER NOT NULL REFERENCES dues(id),
+        user_id INTEGER NOT NULL REFERENCES users(id),
+        utr_reference TEXT NOT NULL,
+        screenshot TEXT,
+        txn_id TEXT,
+        txn_datetime TEXT,
+        amount_detected TEXT,
+        ai_verdict TEXT,
+        ai_reason TEXT,
+        ai_checked_at TEXT,
+        provisional_receipt_at TEXT,
+        receipt_at TEXT,
+        status TEXT NOT NULL DEFAULT 'submitted' CHECK (status IN ('submitted','verified','rejected','duplicate')),
+        reviewed_by INTEGER,
+        reviewed_at TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      INSERT INTO payments_new (id, due_id, user_id, utr_reference, screenshot, txn_id, txn_datetime,
+        amount_detected, ai_verdict, ai_reason, ai_checked_at, provisional_receipt_at, receipt_at,
+        status, reviewed_by, reviewed_at, created_at)
+        SELECT id, due_id, user_id, utr_reference, screenshot, txn_id, txn_datetime,
+               amount_detected, ai_verdict, ai_reason, ai_checked_at, provisional_receipt_at, receipt_at,
+               status, reviewed_by, reviewed_at, created_at
+        FROM payments;
+      DROP TABLE payments;
+      ALTER TABLE payments_new RENAME TO payments;
+    `);
+  })();
+  db.pragma('foreign_keys = ON');
+  const violations = db.prepare('PRAGMA foreign_key_check').all();
+  if (violations.length > 0) {
+    throw new Error(`payments duplicate-status migration left ${violations.length} foreign key violation(s)`);
+  }
+  console.log('[migrate] payments table rebuilt with duplicate status.');
+}
+migratePaymentsDuplicateStatus();
 
 // Seed default app settings from env (idempotent — never overwrites a value the
 // Control Panel later changed). Payment VPA/payee default from the UPI env vars.

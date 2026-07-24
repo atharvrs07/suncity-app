@@ -22,12 +22,21 @@ export default function Dues() {
 function paymentState(d) {
   const p = d.latest_payment;
   if (d.status === 'paid') return { label: p && p.receipt_at ? 'Paid · receipt emailed' : 'Paid', tone: 'green' };
+  // A duplicate submission leaves the due payable again but is flagged for review.
+  if (p && p.status === 'duplicate') return { label: 'Duplicate — under review', tone: 'red' };
   if (d.status === 'submitted') {
     if (p && p.ai_verdict === 'pass') return { label: 'AI-checked · provisional receipt sent', tone: 'blue' };
     if (p && (p.ai_verdict === 'suspicious' || p.ai_verdict === 'error')) return { label: 'Flagged for manual review', tone: 'orange' };
     return { label: 'Awaiting verification', tone: 'blue' };
   }
   return DUE_STATUS[d.status] || null;
+}
+
+// The dues this payment was auto-mapped against ("June ₹1,500, July ₹500").
+function allocationSummary(p) {
+  const a = p && Array.isArray(p.allocations) ? p.allocations : [];
+  if (!a.length) return null;
+  return a.map((x) => `${x.period_label} (${fmtMoney(x.amount)})`).join(', ');
 }
 
 function MyDues() {
@@ -57,6 +66,10 @@ function MyDues() {
             const payable = ['pending', 'overdue'].includes(d.status);
             const extLeft = 5 - (d.extension_days_used || 0);
             const p = d.latest_payment;
+            const paidSoFar = Number(d.amount_paid || 0);
+            const balance = Number(d.amount) - paidSoFar;
+            const partial = paidSoFar > 0.001 && balance > 0.001 && d.status !== 'paid';
+            const allocSummary = allocationSummary(p);
             return (
               <StaggerItem key={d.id}>
                 <GlassCard>
@@ -68,6 +81,19 @@ function MyDues() {
                     <span style={{ fontSize: 22, fontWeight: 800 }}>{fmtMoney(d.amount)}</span>
                     <span className="muted">Due {fmtDate(d.due_date)}</span>
                   </div>
+                  {partial && (
+                    <p className="tiny" style={{ marginTop: 6, fontWeight: 600 }}>
+                      {fmtMoney(paidSoFar)} paid · {fmtMoney(balance)} balance
+                    </p>
+                  )}
+                  {allocSummary && (p == null || p.status !== 'duplicate') && (
+                    <p className="tiny" style={{ marginTop: 6 }}>Applied to: {allocSummary}</p>
+                  )}
+                  {p && p.status === 'duplicate' && (
+                    <p className="tiny" style={{ marginTop: 6, color: 'var(--red)' }}>
+                      ⚠ This transaction was already submitted before. The society office will review it — you don’t need to pay again unless asked.
+                    </p>
+                  )}
                   {d.status === 'submitted' && p && p.ai_verdict === 'pass' && (
                     <p className="tiny" style={{ marginTop: 6, color: 'var(--green)' }}>
                       ✓ Screenshot checked — a provisional receipt was emailed. Awaiting final verification by the society.
@@ -159,12 +185,20 @@ function PaySheet({ due, onClose, onDone }) {
           {result ? (
             <>
               <div
-                className={result.ai && (result.ai.verdict === 'suspicious' || result.ai.verdict === 'error') ? 'err-banner' : 'ok-banner'}
+                className={
+                  result.ai && ['suspicious', 'error', 'duplicate'].includes(result.ai.verdict) ? 'err-banner' : 'ok-banner'
+                }
               >
                 {result.message}
               </div>
               {result.ai && result.ai.txn_id && (
                 <p className="tiny">Detected transaction ID: <b className="break-anywhere">{result.ai.txn_id}</b></p>
+              )}
+              {result.ai && Array.isArray(result.ai.allocations) && result.ai.allocations.length > 0 && (
+                <p className="tiny" style={{ marginTop: 4 }}>
+                  Applied to:{' '}
+                  {result.ai.allocations.map((a) => `${a.period_label} (${fmtMoney(a.amount)})`).join(', ')}
+                </p>
               )}
               {result.ai && result.ai.reason && (
                 <p className="tiny" style={{ marginTop: 4 }}>{result.ai.reason}</p>
@@ -345,8 +379,17 @@ function UnpaidCard() {
   );
 }
 
+const PAYMENT_TABS = [
+  { value: 'submitted', label: 'To verify' },
+  { value: 'duplicate', label: 'Duplicates' },
+  { value: 'verified', label: 'Verified' },
+  { value: 'rejected', label: 'Rejected' },
+];
+
 function PaymentsTab() {
-  const { data, loading, reload } = useFetch('/api/dues/payments/list?status=submitted');
+  const [pstatus, setPstatus] = useState('submitted');
+  const { data, loading, reload } = useFetch(`/api/dues/payments/list?status=${pstatus}`);
+  const actionable = pstatus === 'submitted' || pstatus === 'duplicate';
 
   async function act(id, action) {
     try {
@@ -358,62 +401,87 @@ function PaymentsTab() {
     }
   }
 
-  if (loading) return <Spinner />;
-  if (!data || data.payments.length === 0)
-    return <Empty emoji="✅" title="Nothing to verify" sub="Submitted payments will appear here." />;
+  const emptySub = {
+    submitted: 'Submitted payments awaiting verification appear here.',
+    duplicate: 'Payments flagged as duplicate transactions appear here.',
+    verified: 'Verified payments appear here.',
+    rejected: 'Rejected payments appear here.',
+  }[pstatus];
 
   return (
-    <StaggerList>
-      {data.payments.map((p) => {
-        const verdictChip =
-          p.ai_verdict === 'pass'
-            ? { tone: 'green', label: 'AI: looks genuine' }
-            : p.ai_verdict === 'suspicious'
-              ? { tone: 'orange', label: 'AI: flagged' }
-              : p.ai_verdict === 'error'
-                ? { tone: 'gray', label: 'AI: unchecked' }
-                : null;
-        return (
-          <StaggerItem key={p.id}>
-            <GlassCard>
-              <div className="row-between">
-                <span className="title-sm">
-                  {p.resident_name}
-                  {p.resident_flat ? ` (${p.resident_flat})` : ''}
-                </span>
-                <span style={{ fontWeight: 800 }}>{fmtMoney(p.amount)}</span>
-              </div>
-              <p className="muted" style={{ marginTop: 4 }}>{p.period_label}</p>
-              <p className="tiny break-anywhere" style={{ marginTop: 4 }}>
-                Txn / UTR: <b>{p.txn_id || p.utr_reference}</b>
-                {p.txn_datetime ? ` · ${p.txn_datetime}` : ''}
-              </p>
-              {/* Gemini's assist for the human decision (item 22). */}
-              {verdictChip && (
-                <div className="row wrap" style={{ marginTop: 8, gap: 8 }}>
-                  <Chip tone={verdictChip.tone}>{verdictChip.label}</Chip>
-                  {p.provisional_receipt_at && <Chip tone="blue">Provisional receipt sent</Chip>}
-                </div>
-              )}
-              {p.ai_reason && <p className="tiny" style={{ marginTop: 6 }}>{p.ai_reason}</p>}
-              {p.screenshot && (
-                <a href={p.screenshot} target="_blank" rel="noreferrer" className="more-link" style={{ marginTop: 6 }}>
-                  🖼️ View screenshot
-                </a>
-              )}
-              <div className="row" style={{ marginTop: 10 }}>
-                <Btn variant="success" sm onClick={() => act(p.id, 'verify')}>
-                  ✓ Verify & send receipt
-                </Btn>
-                <Btn variant="danger" sm onClick={() => act(p.id, 'reject')}>
-                  ✕ Reject
-                </Btn>
-              </div>
-            </GlassCard>
-          </StaggerItem>
-        );
-      })}
-    </StaggerList>
+    <>
+      <div style={{ marginBottom: 12 }}>
+        <Segmented options={PAYMENT_TABS} value={pstatus} onChange={setPstatus} />
+      </div>
+      {loading && <Spinner />}
+      {!loading && (!data || data.payments.length === 0) && <Empty emoji="✅" title="Nothing here" sub={emptySub} />}
+      <StaggerList>
+        {data &&
+          data.payments.map((p) => {
+            const isDup = p.status === 'duplicate' || p.ai_verdict === 'duplicate';
+            const verdictChip = isDup
+              ? { tone: 'red', label: 'Duplicate' }
+              : p.ai_verdict === 'pass'
+                ? { tone: 'green', label: 'AI: looks genuine' }
+                : p.ai_verdict === 'suspicious'
+                  ? { tone: 'orange', label: 'AI: flagged' }
+                  : p.ai_verdict === 'error'
+                    ? { tone: 'gray', label: 'AI: unchecked' }
+                    : null;
+            const alloc = Array.isArray(p.allocations) ? p.allocations : [];
+            return (
+              <StaggerItem key={p.id}>
+                <GlassCard>
+                  <div className="row-between">
+                    <span className="title-sm">
+                      {p.resident_name}
+                      {p.resident_flat ? ` (${p.resident_flat})` : ''}
+                    </span>
+                    <span style={{ fontWeight: 800 }}>{fmtMoney(p.amount)}</span>
+                  </div>
+                  <p className="muted" style={{ marginTop: 4 }}>{p.period_label}</p>
+                  <p className="tiny break-anywhere" style={{ marginTop: 4 }}>
+                    Txn / UTR: <b>{p.txn_id || p.utr_reference}</b>
+                    {p.txn_datetime ? ` · ${p.txn_datetime}` : ''}
+                  </p>
+                  {alloc.length > 0 && (
+                    <p className="tiny" style={{ marginTop: 4 }}>
+                      Applied to: {alloc.map((a) => `${a.period_label} (${fmtMoney(a.amount)})`).join(', ')}
+                    </p>
+                  )}
+                  {(verdictChip || p.provisional_receipt_at) && (
+                    <div className="row wrap" style={{ marginTop: 8, gap: 8 }}>
+                      {verdictChip && <Chip tone={verdictChip.tone}>{verdictChip.label}</Chip>}
+                      {p.provisional_receipt_at && <Chip tone="blue">Provisional receipt sent</Chip>}
+                    </div>
+                  )}
+                  {isDup && (
+                    <p className="tiny" style={{ marginTop: 6, color: 'var(--red)' }}>
+                      ⚠ This transaction ID / UTR was already submitted elsewhere — investigate before verifying.
+                    </p>
+                  )}
+                  {p.ai_reason && !isDup && <p className="tiny" style={{ marginTop: 6 }}>{p.ai_reason}</p>}
+                  {p.screenshot && (
+                    <a href={p.screenshot} target="_blank" rel="noreferrer" className="more-link" style={{ marginTop: 6 }}>
+                      🖼️ View screenshot
+                    </a>
+                  )}
+                  {actionable && (
+                    <div className="row" style={{ marginTop: 10 }}>
+                      <Btn variant="success" sm onClick={() => act(p.id, 'verify')}>
+                        {isDup ? '✓ Verify anyway' : '✓ Verify & send receipt'}
+                      </Btn>
+                      <Btn variant="danger" sm onClick={() => act(p.id, 'reject')}>
+                        ✕ Reject
+                      </Btn>
+                    </div>
+                  )}
+                </GlassCard>
+              </StaggerItem>
+            );
+          })}
+      </StaggerList>
+    </>
   );
 }
 
@@ -511,6 +579,11 @@ function AllDuesTab() {
                     <span className="muted">{d.period_label}{d.resident_block ? ` · ${d.resident_block}` : ''}</span>
                     <span style={{ fontWeight: 800 }}>{fmtMoney(d.amount)}</span>
                   </div>
+                  {Number(d.amount_paid) > 0.001 && d.status !== 'paid' && (
+                    <p className="tiny" style={{ marginTop: 4, fontWeight: 600 }}>
+                      {fmtMoney(d.amount_paid)} paid · {fmtMoney(d.amount - d.amount_paid)} balance
+                    </p>
+                  )}
                   <div className="row-between" style={{ marginTop: 6 }}>
                     <span className="tiny">Due {fmtDate(d.due_date)}</span>
                     {d.status !== 'paid' && (
