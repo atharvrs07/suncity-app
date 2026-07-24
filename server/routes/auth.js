@@ -14,7 +14,7 @@ const {
   sendPendingAccountAdminEmail,
 } = require('../lib/mailer');
 const { isValidHouseNo } = require('../lib/houseNumbers');
-const { isDisposableEmail, hasMxRecords } = require('../lib/emailValidation');
+const { isDisposableEmail, hasMxRecords, domainOf } = require('../lib/emailValidation');
 const upload = require('../lib/uploads');
 
 const router = express.Router();
@@ -155,14 +155,20 @@ router.post('/signup', async (req, res) => {
   if (isDisposableEmail(cleanEmail)) {
     return res.status(400).json({ error: 'Please use a permanent email address' });
   }
-  // The domain must actually be able to receive mail (publishes MX records).
+  // The domain should be able to receive mail (publishes MX records). A *provable*
+  // "no MX" blocks signup with a helpful message. But if the check itself can't
+  // run — DNS egress blocked, resolver down, lookup timed out — we must NOT block
+  // every legitimate signup. We log it and fall through to the OTP step, which is
+  // the real deliverability test: a bogus domain simply never receives the code.
   try {
     if (!(await hasMxRecords(cleanEmail))) {
       return res.status(400).json({ error: "This email domain can't receive mail — please check the address." });
     }
   } catch (err) {
-    console.error('[signup] MX lookup failed:', err.message);
-    return res.status(503).json({ error: 'Could not verify your email domain right now. Please try again in a moment.' });
+    console.warn(
+      `[signup] MX verification could not run for domain "${domainOf(cleanEmail)}" ` +
+        `(code=${err.code || 'n/a'}: ${err.message}) — allowing signup to proceed to OTP.`
+    );
   }
 
   if (db.prepare('SELECT id FROM users WHERE phone = ?').get(cleanPhone)) {
