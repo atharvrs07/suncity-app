@@ -1,5 +1,6 @@
 const nodemailer = require('nodemailer');
 const cfg = require('../config');
+const { buildReceiptPdf } = require('./receiptPdf');
 
 // Gmail SMTP via App Password (Google requires app passwords for SMTP with 2FA).
 // When GMAIL_APP_PASSWORD is not set (local dev), emails are logged to the
@@ -13,13 +14,14 @@ const transport = cfg.MAIL.appPassword
     })
   : null;
 
-async function sendMail({ to, subject, text, html }) {
+async function sendMail({ to, subject, text, html, attachments }) {
   if (!transport) {
     console.log(`[mail] SMTP not configured (GMAIL_APP_PASSWORD empty) — would have sent:`);
-    console.log(`[mail] To: ${to}\n[mail] Subject: ${subject}\n[mail] ${text}`);
+    const attachNote = attachments && attachments.length ? ` (+${attachments.length} attachment: ${attachments.map((a) => a.filename).join(', ')})` : '';
+    console.log(`[mail] To: ${to}\n[mail] Subject: ${subject}${attachNote}\n[mail] ${text}`);
     return;
   }
-  await transport.sendMail({ from: `"My Suncity Vistaar" <${cfg.MAIL.user}>`, to, subject, text, html });
+  await transport.sendMail({ from: `"My Suncity Vistaar" <${cfg.MAIL.user}>`, to, subject, text, html, attachments });
 }
 
 function sendPasswordResetEmail({ to, name, resetUrl }) {
@@ -142,16 +144,27 @@ function sendPendingAccountAdminEmail({ to, adminName, pending }) {
 //    marked "Provisional Receipt — Subject to Payment Verification by Society".
 //  - provisional=false → the final/permanent receipt, sent when an admin/office
 //    bearer manually verifies the payment.
-function sendPaymentReceiptEmail({ to, name, receipt, provisional }) {
+// `items` is the itemized month/due breakdown ([{ periodLabel, amount }]) the
+// payment was applied to (oldest-first mapping). The receipt lists each and a
+// total, and the same breakdown is rendered into an attached PDF. Falls back to
+// a single line from `receipt.periodLabel`/`receipt.amountValue` if no items.
+async function sendPaymentReceiptEmail({ to, name, receipt, items = [], provisional }) {
   const {
     receiptNo,
-    amount,
-    periodLabel,
     txnId,
     txnDateTime,
     paidOn,
     society = 'SunCity Vistaar - Jan Kalyan Samiti',
   } = receipt;
+  const lineItems =
+    items && items.length
+      ? items
+      : receipt.periodLabel
+        ? [{ periodLabel: receipt.periodLabel, amount: Number(receipt.amountValue || 0) }]
+        : [];
+  const total = lineItems.reduce((s, it) => s + Number(it.amount || 0), 0);
+  const inr = (n) => `₹${Number(n || 0).toLocaleString('en-IN')}`;
+
   const heading = provisional ? 'Provisional Payment Receipt' : 'Payment Receipt';
   const subject = provisional
     ? `Provisional receipt for your payment — ${society}`
@@ -162,22 +175,29 @@ function sendPaymentReceiptEmail({ to, name, receipt, provisional }) {
   const rows = [
     ['Receipt No.', receiptNo],
     ['Resident', name],
-    ['For', periodLabel],
-    ['Amount', `₹${amount}`],
     ['Transaction ID', txnId || '—'],
     ['Payment date/time', txnDateTime || '—'],
     ['Recorded on', paidOn],
   ];
+  const itemsText = lineItems.length
+    ? lineItems.map((it) => `  • ${it.periodLabel}: ${inr(it.amount)}`).join('\n')
+    : '  • —';
   const text =
     `${heading}\n${society}\n\n` +
     `*** ${watermark} ***\n\n` +
     rows.map(([k, v]) => `${k}: ${v}`).join('\n') +
-    `\n\n` +
+    `\n\nPayment applied to:\n${itemsText}\nTotal paid: ${inr(total)}\n\n` +
     (provisional
       ? 'This is a provisional acknowledgement generated after an automated check of your payment screenshot. It is subject to final verification by the society office. A permanent receipt will follow once verified.\n'
       : 'This payment has been verified by the society office. This is your final receipt.\n') +
-    `\n— ${society}`;
+    `\nA PDF copy of this receipt is attached.\n\n— ${society}`;
   const bannerColor = provisional ? '#e0851a' : '#1fa060';
+  const itemRowsHtml = (lineItems.length ? lineItems : [{ periodLabel: '—', amount: 0 }])
+    .map(
+      (it) =>
+        `<tr><td style="padding:7px 12px 7px 0;">${it.periodLabel}</td><td style="padding:7px 0;font-weight:600;text-align:right;">${inr(it.amount)}</td></tr>`
+    )
+    .join('');
   const html = `
   <div style="font-family:Arial,Helvetica,sans-serif;max-width:560px;margin:0 auto;padding:0;color:#232634;border:1px solid #e6e8f0;border-radius:14px;overflow:hidden;">
     <div style="background:${bannerColor};color:#fff;padding:10px 20px;font-size:12px;font-weight:bold;letter-spacing:0.04em;text-align:center;">
@@ -194,16 +214,33 @@ function sendPaymentReceiptEmail({ to, name, receipt, provisional }) {
           )
           .join('')}
       </table>
+      <p style="margin:20px 0 6px;color:#5d6175;font-size:12px;font-weight:bold;letter-spacing:0.03em;text-transform:uppercase;">Payment applied to</p>
+      <table style="border-collapse:collapse;font-size:14px;width:100%;">
+        <tr style="color:#5d6175;font-size:12px;"><td style="padding:4px 0;">Month / Due</td><td style="padding:4px 0;text-align:right;">Amount</td></tr>
+        ${itemRowsHtml}
+        <tr style="border-top:1px solid #e6e8f0;"><td style="padding:9px 0 0;font-weight:bold;">Total paid</td><td style="padding:9px 0 0;font-weight:bold;text-align:right;">${inr(total)}</td></tr>
+      </table>
       <p style="color:#5d6175;font-size:12.5px;margin-top:20px;line-height:1.5;">
         ${
           provisional
             ? 'This is a provisional acknowledgement generated after an automated check of your payment screenshot. It is <b>subject to final verification by the society</b>. A permanent receipt will follow once the office verifies it.'
             : 'This payment has been <b>verified by the society office</b>. This is your final receipt.'
         }
+        A PDF copy is attached.
       </p>
     </div>
   </div>`;
-  return sendMail({ to, subject, text, html });
+
+  // Generate the PDF; if it fails for any reason, still send the email (the HTML
+  // body carries the same itemized detail) rather than dropping the receipt.
+  let attachments;
+  try {
+    const pdf = await buildReceiptPdf({ receipt: { ...receipt, resident: name }, items: lineItems, provisional });
+    attachments = [{ filename: `receipt-${receiptNo}.pdf`, content: pdf, contentType: 'application/pdf' }];
+  } catch (err) {
+    console.error('[receipt] PDF generation failed:', err.message);
+  }
+  return sendMail({ to, subject, text, html, attachments });
 }
 
 module.exports = {

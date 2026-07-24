@@ -503,6 +503,45 @@ Follow-up fix/feature pass on the feature batch above.
   confirmed: notification dropdown/sheet open & close cleanly, day sheet with times, real QR +
   VPA on a resident Home, and the three platform-specific language pickers. Client build clean.
 
+## Payment reconciliation — oldest-first mapping, partial payments, duplicate status, PDF receipts (added 2026-07-24)
+
+Builds on the AI-verified payment-screenshot flow: a verified payment now auto-reconciles against
+the resident's outstanding dues and every receipt is an itemized PDF.
+
+- **Schema (`db.js`)** — `dues.amount_paid REAL NOT NULL DEFAULT 0` (a due is fully paid when
+  `amount_paid >= amount`; `0 < amount_paid < amount` is a partial payment — represented by the
+  balance, no new dues status). New `payment_allocations (payment_id, due_id, amount)` records which
+  due(s)/month(s) each payment was applied to (source of truth for the receipt + reject rollback).
+  `payments.status` gains **`duplicate`**. Migrations: guarded `ALTER` for `amount_paid` (in
+  `migrateFeatureBatch2026`) + guarded table-rebuild `migratePaymentsDuplicateStatus()` (widens the
+  CHECK; runs after the AI-column adds; `PRAGMA foreign_key_check` verified clean on the real DB).
+- **Duplicate detection is a first-class status** — a txn id / UTR already used by ANY other payment
+  (any resident, any status) sets the new submission to `status='duplicate'` (no allocation, no
+  receipt); the entry due reverts and dues managers + the resident are notified. Checked for a typed
+  UTR immediately and for the AI-extracted txn id. An admin can still **Verify anyway** after
+  investigating (the override).
+- **Oldest-first allocation (`routes/dues.js`)** — helpers `outstandingDuesOldestFirst`,
+  `applyAllocation` (walks dues oldest-first, fills each, records allocations), `rollbackAllocation`,
+  `recomputeDueStatus` (paid / in-review 'submitted' / date-based). **Allocation amount = the
+  AI-detected screenshot amount, falling back to the opened due's billed amount.** **Committed
+  immediately on AI-pass** (dues marked paid/partial then); admin **reject rolls it back** (restores
+  `amount_paid`, deletes allocations, recomputes). Manual verify (AI off / suspicious override)
+  allocates at verify time if not already allocated.
+- **Itemized PDF receipts** — new dep **`pdfkit`** (pure-JS, no Chromium). `server/lib/receiptPdf.js`
+  `buildReceiptPdf({receipt, items, provisional})` renders a one-page PDF listing each month/due and
+  the total (amounts as `Rs.` — Helvetica AFM has no ₹ glyph). `mailer.sendMail` now forwards
+  `attachments`; `sendPaymentReceiptEmail` takes `items[]`, itemizes the HTML/text body, and attaches
+  the PDF. Both **provisional** (AI-pass) and **permanent** (verified) receipts are itemized.
+- **Client (`pages/Dues.jsx`)** — resident cards show partial balance (`₹X paid · ₹Y balance`), the
+  "Applied to: June (₹1,500), July (₹500)" breakdown, and a red "Duplicate — under review" state. The
+  admin Verify tab gains a **status filter** (To verify / Duplicates / Verified / Rejected), the
+  per-payment allocation breakdown, and a duplicate warning with a "Verify anyway" action. RBAC
+  unchanged — `/payments/list` stays behind `manage_dues`; residents see only their own via `/mine`.
+- Verified 2026-07-24: 27/27 HTTP integration checks (stubbed Gemini) — spanning payment covers two
+  dues + itemized receipt, partial spanning + reject rollback, duplicate flagged/blocked/reverted,
+  AI-off allocate-at-verify, resident 403 on `/payments/list`, admin sees duplicates. Fresh-DB boot +
+  old-DB migration clean (0 FK violations); client build clean.
+
 ## Key invariants (enforce on any change)
 
 - **RBAC lives on the API**, not just the UI. Roles: super_admin (hidden, all-powerful),
@@ -525,9 +564,13 @@ Follow-up fix/feature pass on the feature batch above.
   whenever zero approved admins exist, so the chain can never dead-lock. Approvals screen shows
   filled office-bearer/supervisor slots (informational, not hard-capped).
 - **Dues**: UPI QR is client-generated (`upi://pay?pa=&pn=&am=&tr=DUE{id}&cu=INR` via qrcode pkg);
-  resident submits UTR → admin verifies/rejects. Automation dedupe via partial unique index on
-  (automation_id, user_id, period_key). Extensions max 5 days total per due, summed over
-  pending+approved requests, enforced server-side; approval pushes dues.due_date.
+  resident submits UTR and/or an AI-checked screenshot → admin verifies/rejects. Txn ids are
+  **system-wide unique** (a reuse ⇒ `payments.status='duplicate'`, no allocation/receipt). On an AI
+  pass the paid amount auto-maps against outstanding dues **oldest-first** (`payment_allocations`;
+  `dues.amount_paid` holds partials), committed immediately; **reject rolls it back**. Receipts are
+  **itemized PDFs** (provisional/permanent) via `lib/receiptPdf.js` (pdfkit). Automation dedupe via
+  partial unique index on (automation_id, user_id, period_key). Extensions max 5 days total per due,
+  summed over pending+approved requests, enforced server-side; approval pushes dues.due_date.
 - Notices with `admin_only=1` are visible to admins only; only admins can set the flag.
 
 ## Nice-to-have next steps (not started)

@@ -26,7 +26,12 @@ const LATEST_PAYMENT = `(
     'id', p.id, 'utr_reference', p.utr_reference, 'status', p.status, 'created_at', p.created_at,
     'screenshot', p.screenshot, 'txn_id', p.txn_id, 'txn_datetime', p.txn_datetime,
     'ai_verdict', p.ai_verdict, 'ai_reason', p.ai_reason,
-    'provisional_receipt_at', p.provisional_receipt_at, 'receipt_at', p.receipt_at
+    'provisional_receipt_at', p.provisional_receipt_at, 'receipt_at', p.receipt_at,
+    'allocations', (
+      SELECT json_group_array(json_object('period_label', dd.period_label, 'amount', pa.amount))
+      FROM payment_allocations pa JOIN dues dd ON dd.id = pa.due_id
+      WHERE pa.payment_id = p.id ORDER BY dd.due_date ASC, dd.id ASC
+    )
   )
   FROM payments p WHERE p.due_id = d.id ORDER BY p.created_at DESC, p.id DESC LIMIT 1
 )`;
@@ -53,11 +58,103 @@ router.get('/mine', (req, res) => {
   res.json({ dues });
 });
 
+// ---- Oldest-first payment allocation ----
+// A submitted payment is mapped against the resident's outstanding dues, oldest
+// first: the earliest unpaid due is filled, then the next, until the payment
+// amount is exhausted (the last touched due may be left partially paid). Each
+// (payment, due) slice is recorded in payment_allocations — the source of truth
+// for the itemized receipt and for rollback if the payment is later rejected.
+
+const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
+// The amount that drives allocation: the amount the AI read off the screenshot
+// (what was actually paid), falling back to the opened due's billed amount when
+// the screenshot amount is missing/unparseable.
+function allocationAmount(aiAmount, dueAmount) {
+  const a = Number(aiAmount);
+  return Number.isFinite(a) && a > 0 ? round2(a) : round2(dueAmount);
+}
+
+function outstandingDuesOldestFirst(userId) {
+  return db
+    .prepare(
+      `SELECT * FROM dues
+       WHERE user_id = ? AND status != 'paid' AND amount_paid < amount
+       ORDER BY due_date ASC, id ASC`
+    )
+    .all(userId);
+}
+
+// Recompute one due's status from its balance + any in-flight payment. Idempotent
+// and always safe to call after allocate / rollback / verify.
+//  - fully covered (amount_paid >= amount) → 'paid'
+//  - otherwise a submitted payment still allocates to it → 'submitted' (in review)
+//  - otherwise date-based: 'overdue' if past due_date, else 'pending'
+function recomputeDueStatus(dueId) {
+  const due = db.prepare('SELECT id, amount, amount_paid, due_date FROM dues WHERE id = ?').get(dueId);
+  if (!due) return;
+  let status;
+  if (round2(due.amount_paid) >= round2(due.amount) - 0.001) {
+    status = 'paid';
+  } else {
+    const inReview = db
+      .prepare(
+        "SELECT 1 FROM payment_allocations pa JOIN payments p ON p.id = pa.payment_id WHERE pa.due_id = ? AND p.status = 'submitted' LIMIT 1"
+      )
+      .get(dueId);
+    status = inReview ? 'submitted' : due.due_date < localDateStr() ? 'overdue' : 'pending';
+  }
+  db.prepare('UPDATE dues SET status = ? WHERE id = ?').run(status, dueId);
+}
+
+// Apply `amount` across the resident's outstanding dues oldest-first, recording a
+// payment_allocations row per touched due. Self-contained transaction. Returns
+// the applied slices ([{ due, applied }]) for the receipt itemization.
+const applyAllocation = db.transaction((paymentId, userId, amount) => {
+  let remaining = round2(amount);
+  const applied = [];
+  for (const due of outstandingDuesOldestFirst(userId)) {
+    if (remaining <= 0) break;
+    const owed = round2(due.amount - due.amount_paid);
+    if (owed <= 0) continue;
+    const use = round2(Math.min(owed, remaining));
+    db.prepare('UPDATE dues SET amount_paid = amount_paid + ? WHERE id = ?').run(use, due.id);
+    db.prepare('INSERT INTO payment_allocations (payment_id, due_id, amount) VALUES (?, ?, ?)').run(paymentId, due.id, use);
+    applied.push({ due, applied: use });
+    remaining = round2(remaining - use);
+  }
+  for (const a of applied) recomputeDueStatus(a.due.id);
+  return applied;
+});
+
+// Undo a payment's allocations (on reject): restore each due's amount_paid, drop
+// the allocation rows, and recompute the affected dues' statuses.
+const rollbackAllocation = db.transaction((paymentId) => {
+  const allocs = db.prepare('SELECT due_id, amount FROM payment_allocations WHERE payment_id = ?').all(paymentId);
+  for (const a of allocs) {
+    db.prepare('UPDATE dues SET amount_paid = MAX(0, amount_paid - ?) WHERE id = ?').run(a.amount, a.due_id);
+  }
+  db.prepare('DELETE FROM payment_allocations WHERE payment_id = ?').run(paymentId);
+  for (const a of allocs) recomputeDueStatus(a.due_id);
+});
+
+// The month/due breakdown a payment was applied to — for receipts and the UI.
+function paymentAllocationItems(paymentId) {
+  return db
+    .prepare(
+      `SELECT dd.period_label AS periodLabel, pa.amount AS amount, pa.due_id AS due_id
+       FROM payment_allocations pa JOIN dues dd ON dd.id = pa.due_id
+       WHERE pa.payment_id = ? ORDER BY dd.due_date ASC, dd.id ASC`
+    )
+    .all(paymentId);
+}
+
 // Build the receipt payload for a verified/provisional payment.
 function buildReceipt(payment, due, user) {
   return {
     receiptNo: `SCV-${String(payment.id).padStart(6, '0')}`,
-    amount: Number(due.amount).toLocaleString('en-IN'),
+    resident: user ? user.name : '',
+    amountValue: Number(due.amount), // single-line fallback when there are no allocation items
     periodLabel: due.period_label,
     txnId: payment.txn_id || payment.utr_reference || null,
     txnDateTime: payment.txn_datetime || null,
@@ -66,21 +163,31 @@ function buildReceipt(payment, due, user) {
   };
 }
 
-// Send a receipt email if the resident has an email on file. Returns whether it
-// was attempted so the caller can record the timestamp.
+// Send a receipt email (itemized by the dues this payment covered) if the
+// resident has an email on file. Returns whether it was attempted so the caller
+// can record the timestamp.
 function sendReceipt(payment, due, user, provisional) {
   if (!user || !user.email) return false;
-  sendPaymentReceiptEmail({ to: user.email, name: user.name, receipt: buildReceipt(payment, due, user), provisional }).catch(
-    (err) => console.error('[receipt] send failed:', err.message)
-  );
+  let items = paymentAllocationItems(payment.id);
+  if (!items.length) items = [{ periodLabel: due.period_label, amount: Number(due.amount) }];
+  sendPaymentReceiptEmail({
+    to: user.email,
+    name: user.name,
+    receipt: buildReceipt(payment, due, user),
+    items,
+    provisional,
+  }).catch((err) => console.error('[receipt] send failed:', err.message));
   return true;
 }
 
 // ---- Resident submits a payment (UTR and/or screenshot) ----
-// If a screenshot is attached and Gemini is configured, it's analysed (item 22):
-// the transaction id + date/time are extracted, checked for duplicates and
-// recency, and — if the check passes — a provisional receipt is emailed
-// automatically. A suspicious result is flagged for admin attention instead. An
+// If a screenshot is attached and Gemini is configured, it's analysed: the
+// transaction id + date/time + amount are extracted and the id is checked for a
+// system-wide duplicate. A duplicate is set aside as its own 'duplicate' status
+// (no allocation, no receipt) for admins to investigate. Otherwise, on a passing
+// check the paid amount is auto-mapped against the resident's outstanding dues
+// oldest-first (partial on the last), and an itemized PROVISIONAL receipt is
+// emailed. A suspicious/unreadable result is flagged for manual review. An
 // admin/office bearer still does the final manual verification either way.
 router.post('/:id/payment', upload.single('screenshot'), async (req, res) => {
   const utrBody = String((req.body && req.body.utr_reference) || '').trim();
@@ -102,6 +209,48 @@ router.post('/:id/payment', upload.single('screenshot'), async (req, res) => {
   const paymentId = info.lastInsertRowid;
   db.prepare("UPDATE dues SET status = 'submitted' WHERE id = ?").run(due.id);
 
+  // System-wide uniqueness: a txn id / UTR used by ANY other payment (any
+  // resident, any status) makes this a duplicate.
+  const isDuplicateId = (id) =>
+    !!id && !!db.prepare('SELECT id FROM payments WHERE id != ? AND (txn_id = ? OR utr_reference = ?)').get(paymentId, id, id);
+
+  // Flag as duplicate: record what we know, do NOT allocate or send a receipt,
+  // revert the entry due, and alert dues managers + the resident to investigate.
+  const flagDuplicate = ({ txnId, txnDateTime, amountDetected, reason }) => {
+    db.prepare(
+      `UPDATE payments SET status = 'duplicate', ai_verdict = 'duplicate', ai_reason = ?, ai_checked_at = datetime('now'),
+         txn_id = COALESCE(?, txn_id), txn_datetime = COALESCE(?, txn_datetime), amount_detected = COALESCE(?, amount_detected),
+         utr_reference = COALESCE(NULLIF(utr_reference, 'via-screenshot'), ?) WHERE id = ?`
+    ).run(reason, txnId || null, txnDateTime || null, amountDetected || null, txnId || 'via-screenshot', paymentId);
+    recomputeDueStatus(due.id);
+    const managers = db
+      .prepare("SELECT id FROM users WHERE status = 'approved' AND role IN ('admin','super_admin')")
+      .all()
+      .map((u) => u.id);
+    notifyUsers(managers, {
+      type: 'payment',
+      title: 'Duplicate payment flagged for review',
+      body: `${req.user.name} · ${due.period_label}. ${reason}`.slice(0, 160),
+      link: '/dues',
+    });
+    notifyUsers([req.user.id], {
+      type: 'payment',
+      title: 'Payment needs review',
+      body: `${due.period_label}: this transaction was already recorded. The society office will review it.`,
+      link: '/dues',
+    });
+    logAudit({ actor: req.user, action: 'payment_submit', targetType: 'payment', targetId: paymentId, detail: 'duplicate txn id' });
+  };
+
+  // A typed UTR can be duplicate-checked immediately (with or without AI).
+  if (isDuplicateId(utrBody)) {
+    flagDuplicate({ reason: 'This UTR / transaction reference has already been submitted before.' });
+    return res.status(201).json({
+      message: 'This transaction appears to have already been submitted. The society office will review it.',
+      ai: { verdict: 'duplicate', reason: 'Duplicate transaction reference.' },
+    });
+  }
+
   let ai = null;
   if (screenshot && gemini.isConfigured()) {
     try {
@@ -113,17 +262,20 @@ router.post('/:id/payment', upload.single('screenshot'), async (req, res) => {
         todayISO: localDateStr(),
       });
 
-      // Duplicate detection: has this transaction id (or the typed UTR) been
-      // submitted before, on this due or any other? Catches reused/old screenshots.
-      let duplicate = false;
-      const idToCheck = result.transaction_id || utrBody || null;
-      if (idToCheck) {
-        const dup = db
-          .prepare(
-            "SELECT id FROM payments WHERE id != ? AND (txn_id = ? OR utr_reference = ?)"
-          )
-          .get(paymentId, idToCheck, idToCheck);
-        duplicate = !!dup;
+      const txnId = result.transaction_id || utrBody || null;
+
+      // Duplicate detection on the AI-extracted transaction id (system-wide).
+      if (isDuplicateId(txnId)) {
+        flagDuplicate({
+          txnId,
+          txnDateTime: result.datetime || null,
+          amountDetected: result.amount || null,
+          reason: 'This transaction ID has already been submitted before (possible reused screenshot).',
+        });
+        return res.status(201).json({
+          message: 'This transaction appears to have already been submitted. The society office will review it.',
+          ai: { verdict: 'duplicate', reason: 'Duplicate transaction ID.' },
+        });
       }
 
       let verdict = 'suspicious';
@@ -131,9 +283,6 @@ router.post('/:id/payment', upload.single('screenshot'), async (req, res) => {
       if (!result.ok) {
         verdict = 'error';
         reason = result.reason || 'The screenshot could not be read clearly.';
-      } else if (duplicate) {
-        verdict = 'suspicious';
-        reason = 'This transaction ID has already been submitted before (possible duplicate/reused screenshot).';
       } else if (!result.is_payment_screenshot) {
         verdict = 'suspicious';
         reason = reason || "This doesn't look like a payment confirmation screenshot.";
@@ -147,7 +296,6 @@ router.post('/:id/payment', upload.single('screenshot'), async (req, res) => {
         verdict = 'pass';
       }
 
-      const txnId = result.transaction_id || (utrBody || null);
       db.prepare(
         `UPDATE payments SET txn_id = ?, txn_datetime = ?, amount_detected = ?, ai_verdict = ?, ai_reason = ?,
            ai_checked_at = datetime('now'), utr_reference = COALESCE(NULLIF(utr_reference, 'via-screenshot'), ?) WHERE id = ?`
@@ -155,21 +303,28 @@ router.post('/:id/payment', upload.single('screenshot'), async (req, res) => {
 
       ai = { verdict, reason, txn_id: txnId, txn_datetime: result.datetime || null };
 
-      // On a passing check, auto-email the resident a PROVISIONAL receipt and
-      // record it. On a suspicious/error check, do NOT send one — flag for admins.
-      const payment = db.prepare('SELECT * FROM payments WHERE id = ?').get(paymentId);
       if (verdict === 'pass') {
+        // Commit the allocation now (oldest-first) and email the itemized
+        // PROVISIONAL receipt. Admin verification later makes it permanent.
+        const amount = allocationAmount(result.amount, due.amount);
+        const applied = applyAllocation(paymentId, req.user.id, amount);
+        recomputeDueStatus(due.id); // the entry due may not be among the touched dues
+        const payment = db.prepare('SELECT * FROM payments WHERE id = ?').get(paymentId);
         if (sendReceipt(payment, due, req.user, true)) {
           db.prepare("UPDATE payments SET provisional_receipt_at = datetime('now') WHERE id = ?").run(paymentId);
         }
+        const total = applied.reduce((s, a) => s + a.applied, 0);
+        const covered = applied.map((a) => a.due.period_label).join(', ') || due.period_label;
         notifyUsers([req.user.id], {
           type: 'payment',
           title: 'Payment received — provisional receipt sent',
-          body: `${due.period_label} · ₹${due.amount}. Awaiting final verification by the society.`,
+          body: `₹${total} applied to ${covered}. Awaiting final verification by the society.`.slice(0, 160),
           link: '/dues',
         });
+        ai.allocations = applied.map((a) => ({ period_label: a.due.period_label, amount: a.applied }));
       } else {
-        // Flag suspicious/unreadable submissions to dues managers.
+        // Flag suspicious/unreadable submissions to dues managers (the entry due
+        // stays 'submitted' for manual verification).
         const managers = db
           .prepare("SELECT id FROM users WHERE status = 'approved' AND role IN ('admin','super_admin')")
           .all()
@@ -278,7 +433,8 @@ router.post('/', canManageDues, (req, res) => {
 router.patch('/:id/mark-paid', canManageDues, (req, res) => {
   const due = db.prepare('SELECT * FROM dues WHERE id = ?').get(req.params.id);
   if (!due) return res.status(404).json({ error: 'Due not found' });
-  db.prepare("UPDATE dues SET status = 'paid' WHERE id = ?").run(due.id);
+  // Settle the balance too, so amount_paid stays consistent with the status.
+  db.prepare("UPDATE dues SET status = 'paid', amount_paid = amount WHERE id = ?").run(due.id);
   res.json({ message: 'Marked as paid' });
 });
 
@@ -289,7 +445,7 @@ router.get('/unpaid-residents', canManageDues, (req, res) => {
     .prepare(
       `SELECT u.id AS user_id, u.name, u.phone, u.flat_no, u.block,
               COUNT(d.id) AS unpaid_count,
-              SUM(d.amount) AS unpaid_amount,
+              SUM(d.amount - d.amount_paid) AS unpaid_amount,
               SUM(CASE WHEN d.status = 'overdue' THEN 1 ELSE 0 END) AS overdue_count
        FROM dues d JOIN users u ON u.id = d.user_id
        WHERE d.status != 'paid'
@@ -316,64 +472,94 @@ router.get('/overdue-watch', canManageDues, (req, res) => {
   res.json({ overdue: rows });
 });
 
+// Payment submissions for admins/OB. `status` filters the queue: 'submitted'
+// (default, the verify queue), 'duplicate' (flagged for investigation),
+// 'verified', or 'rejected'. Each row carries the itemized allocation breakdown
+// so managers see which month(s) it was applied to.
 router.get('/payments/list', canManageDues, (req, res) => {
   const status = req.query.status || 'submitted';
   const payments = db
     .prepare(
-      `SELECT p.*, d.amount, d.period_label, d.due_date, u.name AS resident_name, u.phone AS resident_phone, u.flat_no AS resident_flat
+      `SELECT p.*, d.amount, d.period_label, d.due_date, u.name AS resident_name, u.phone AS resident_phone, u.flat_no AS resident_flat,
+              (SELECT json_group_array(json_object('period_label', dd.period_label, 'amount', pa.amount))
+               FROM payment_allocations pa JOIN dues dd ON dd.id = pa.due_id
+               WHERE pa.payment_id = p.id ORDER BY dd.due_date ASC, dd.id ASC) AS allocations
        FROM payments p JOIN dues d ON d.id = p.due_id JOIN users u ON u.id = p.user_id
        WHERE p.status = ? ORDER BY p.created_at ASC LIMIT 500`
     )
-    .all(status);
+    .all(status)
+    .map((p) => ({ ...p, allocations: p.allocations ? JSON.parse(p.allocations) : [] }));
   res.json({ payments });
 });
 
-// Manual verification (item 22): the human confirmation that issues the FINAL
-// receipt. Gemini's verdict only assisted — this is the decision that emails the
-// permanent (unwatermarked) receipt.
+// Manual verification: the human confirmation that issues the FINAL receipt.
+// Acts on a 'submitted' payment, or on a 'duplicate' one an admin has
+// investigated and decided is genuine (the override). If the payment hasn't been
+// allocated yet (manual / AI-off path, or a duplicate being overridden), map it
+// oldest-first now, then email the itemized permanent (unwatermarked) receipt.
 router.post('/payments/:pid/verify', canManageDues, (req, res) => {
   const payment = db.prepare('SELECT * FROM payments WHERE id = ?').get(req.params.pid);
   if (!payment) return res.status(404).json({ error: 'Payment not found' });
-  if (payment.status !== 'submitted') return res.status(400).json({ error: 'Payment already reviewed' });
+  if (payment.status !== 'submitted' && payment.status !== 'duplicate') {
+    return res.status(400).json({ error: 'Payment already reviewed' });
+  }
   const due = db.prepare('SELECT * FROM dues WHERE id = ?').get(payment.due_id);
   const resident = db.prepare('SELECT id, name, email FROM users WHERE id = ?').get(payment.user_id);
+
+  // Allocate if this payment carries no allocation yet (oldest-first). Amount =
+  // AI-detected if present, else the opened due's billed amount.
+  const already = db.prepare('SELECT COUNT(*) AS c FROM payment_allocations WHERE payment_id = ?').get(payment.id).c;
+  if (!already) {
+    applyAllocation(payment.id, payment.user_id, allocationAmount(payment.amount_detected, due.amount));
+  }
   const tx = db.transaction(() => {
     db.prepare("UPDATE payments SET status = 'verified', reviewed_by = ?, reviewed_at = datetime('now') WHERE id = ?").run(
       req.user.id,
       payment.id
     );
-    db.prepare("UPDATE dues SET status = 'paid' WHERE id = ?").run(payment.due_id);
+    // Re-settle every due this payment touched now that it's no longer 'submitted'
+    // (fully-covered → paid; a partially-covered due returns to pending/overdue for
+    // its remaining balance).
+    for (const a of db.prepare('SELECT due_id FROM payment_allocations WHERE payment_id = ?').all(payment.id)) {
+      recomputeDueStatus(a.due_id);
+    }
   });
   tx();
-  // Final receipt email + record.
+
+  // Final receipt email + record (itemized by the dues covered).
   const verifiedPayment = db.prepare('SELECT * FROM payments WHERE id = ?').get(payment.id);
   if (sendReceipt(verifiedPayment, due, resident, false)) {
     db.prepare("UPDATE payments SET receipt_at = datetime('now') WHERE id = ?").run(payment.id);
   }
+  const items = paymentAllocationItems(payment.id);
+  const total = items.reduce((s, it) => s + Number(it.amount || 0), 0);
+  const covered = items.map((it) => it.periodLabel).join(', ') || due.period_label;
   notifyUsers([payment.user_id], {
     type: 'payment',
     title: 'Payment verified — receipt sent',
-    body: `${due.period_label} · ₹${due.amount} confirmed by the society office.`,
+    body: `₹${total} confirmed by the society office (${covered}).`.slice(0, 160),
     link: '/dues',
   });
   logAudit({ actor: req.user, action: 'payment_verify', targetType: 'payment', targetId: payment.id, detail: `UTR ${payment.utr_reference}` });
-  res.json({ message: 'Payment verified — final receipt sent, due marked paid' });
+  res.json({ message: 'Payment verified — final receipt sent, dues updated' });
 });
 
+// Reject a 'submitted' or flagged 'duplicate' payment. Any allocation it made is
+// rolled back (dues' amount_paid restored and their statuses recomputed), so the
+// resident's outstanding balance returns to exactly what it was.
 router.post('/payments/:pid/reject', canManageDues, (req, res) => {
   const payment = db.prepare('SELECT * FROM payments WHERE id = ?').get(req.params.pid);
   if (!payment) return res.status(404).json({ error: 'Payment not found' });
-  if (payment.status !== 'submitted') return res.status(400).json({ error: 'Payment already reviewed' });
+  if (payment.status !== 'submitted' && payment.status !== 'duplicate') {
+    return res.status(400).json({ error: 'Payment already reviewed' });
+  }
   const due = db.prepare('SELECT * FROM dues WHERE id = ?').get(payment.due_id);
-  const backTo = due.due_date < localDateStr() ? 'overdue' : 'pending';
-  const tx = db.transaction(() => {
-    db.prepare("UPDATE payments SET status = 'rejected', reviewed_by = ?, reviewed_at = datetime('now') WHERE id = ?").run(
-      req.user.id,
-      payment.id
-    );
-    db.prepare('UPDATE dues SET status = ? WHERE id = ?').run(backTo, payment.due_id);
-  });
-  tx();
+  db.prepare("UPDATE payments SET status = 'rejected', reviewed_by = ?, reviewed_at = datetime('now') WHERE id = ?").run(
+    req.user.id,
+    payment.id
+  );
+  rollbackAllocation(payment.id); // restores amount_paid + recomputes the touched dues
+  recomputeDueStatus(payment.due_id); // covers the manual path where the entry due was set 'submitted' but never allocated
   notifyUsers([payment.user_id], {
     type: 'payment',
     title: 'Payment could not be verified',
